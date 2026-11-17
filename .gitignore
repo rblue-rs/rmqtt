@@ -1,0 +1,6 @@
+/target/
+.dart_tool/
+.packages
+build/
+*.so
+*.dylib

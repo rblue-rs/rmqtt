@@ -1,0 +1,13 @@
+[package]
+name = "mqtt-c"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+[build-dependencies]
+cbindgen = "0.29"
+[dependencies]
+mqtt-api.workspace = true
+mqtt-runtime.workspace = true
+mqtt-core.workspace = true
