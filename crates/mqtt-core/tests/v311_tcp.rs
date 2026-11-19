@@ -1,7 +1,7 @@
 use mqtt_api::{Error, Options};
 use mqtt_core::{Client, Kind};
 use std::{
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::TcpListener,
     sync::mpsc,
     time::Duration,
@@ -28,7 +28,13 @@ fn connack_and_wire_keepalive_contracts() {
             s.write_all(&[0x20, 2, 0, 0]).unwrap();
             if keep == 0 {
                 let mut b = [0];
-                assert!(s.read(&mut b).is_err(), "zero keepalive must not PING");
+                let error = s
+                    .read(&mut b)
+                    .expect_err("zero keepalive: no bytes or EOF expected");
+                assert!(matches!(
+                    error.kind(),
+                    ErrorKind::WouldBlock | ErrorKind::TimedOut
+                ));
             } else {
                 assert_eq!(packet(&mut s), vec![0xc0]);
                 s.write_all(&[0xd0, 0]).unwrap();
@@ -36,7 +42,9 @@ fn connack_and_wire_keepalive_contracts() {
         });
         let mut c = Client::new().unwrap();
         let mut options = Options::new("127.0.0.1", format!("wire-{keep}"), port);
-        options.keep_alive = Duration::from_secs(keep as u64);
+        if keep != 0 {
+            options.keep_alive = Duration::from_secs(keep as u64);
+        }
         assert_eq!(c.connect(1, options), Ok(()));
         rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert_eq!(

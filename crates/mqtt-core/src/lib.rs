@@ -59,9 +59,14 @@ struct Events {
     items: VecDeque<Event>,
     fatal: Option<Event>,
     terminated: bool,
+    sealed: bool,
+    disconnects: Vec<u64>,
 }
 impl Events {
     fn push(&mut self, e: Event) -> Result<(), Error> {
+        if self.sealed {
+            return Err(Error::Closed);
+        }
         if self.terminated {
             return Err(Error::Overflow);
         }
@@ -73,12 +78,21 @@ impl Events {
         Ok(())
     }
     fn fail(&mut self, code: Error, op: u64) {
+        if self.sealed {
+            return;
+        }
         if !self.terminated {
             self.terminated = true;
             let mut e = Event::new(Kind::Failure, op);
             e.code = code as i32;
             self.fatal = Some(e);
         }
+    }
+    fn seal(&mut self) {
+        self.sealed = true;
+        self.items.clear();
+        self.fatal = None;
+        self.disconnects.clear();
     }
 }
 type Queue = Arc<Mutex<Events>>;
@@ -155,6 +169,7 @@ impl Client {
                 return Err(Error::Busy);
             }
             q.terminated = false;
+            q.disconnects.clear();
         }
         self.op(op)?;
         if let Some(task) = self.task.take() {
@@ -236,20 +251,57 @@ impl Client {
         validate_topic(&topic, true)?;
         self.submit(Command::Unsubscribe(op, topic))
     }
+    /// Coalesce concurrent disconnect requests without sending multiple packets.
+    /// Each accepted (monotonic) operation gets a completion or terminal failure.
     pub fn disconnect(&self, op: u64) -> Result<(), Error> {
-        self.submit(Command::Disconnect(op))
+        let mut q = self.events.lock().map_err(|_| Error::Internal)?;
+        match self.state.load(Ordering::SeqCst) {
+            4 => Err(Error::Closed),
+            0 => {
+                self.op(op)?;
+                q.push(Event::new(Kind::Disconnected, op))
+            }
+            2 => {
+                let tx = self.tx.as_ref().ok_or(Error::Closed)?;
+                let permit = tx.try_reserve().map_err(|e| match e {
+                    mpsc::error::TrySendError::Full(_) => Error::QueueFull,
+                    _ => Error::Closed,
+                })?;
+                self.op(op)?;
+                q.disconnects.push(op);
+                self.state.store(3, Ordering::SeqCst);
+                permit.send(Command::Disconnect(op));
+                Ok(())
+            }
+            3 => {
+                if q.disconnects.len() >= 32 {
+                    return Err(Error::QueueFull);
+                }
+                self.op(op)?;
+                q.disconnects.push(op);
+                Ok(())
+            }
+            _ => Err(Error::Busy),
+        }
     }
     /// Force-stop prototype close: no callbacks and no draining guarantee yet.
     pub fn close(&mut self) -> Result<(), Error> {
+        let mut q = self.events.lock().map_err(|_| Error::Internal)?;
+        q.seal();
         self.state.store(4, Ordering::SeqCst);
+        drop(q);
+        self.tx = None;
+        self.stop.notify_one();
         if let Some(t) = self.task.take() {
             t.abort();
         }
-        self.tx = None;
         Ok(())
     }
     pub fn peek(&self) -> Result<Event, Error> {
         let q = self.events.lock().map_err(|_| Error::Internal)?;
+        if q.sealed || self.state.load(Ordering::SeqCst) == 4 {
+            return Err(Error::Closed);
+        }
         q.items
             .front()
             .or(q.fatal.as_ref())
@@ -258,6 +310,9 @@ impl Client {
     }
     pub fn pop(&self) -> Result<Event, Error> {
         let mut q = self.events.lock().map_err(|_| Error::Internal)?;
+        if q.sealed || self.state.load(Ordering::SeqCst) == 4 {
+            return Err(Error::Closed);
+        }
         q.items
             .pop_front()
             .or_else(|| q.fatal.take())
@@ -340,7 +395,9 @@ fn process_event(
 ) -> Result<bool, (Error, u64)> {
     match event {
         EngineEvent::Incoming(Packet::ConnAck(ack)) => {
-            state.store(2, Ordering::SeqCst);
+            state
+                .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
+                .map_err(|_| (Error::Closed, connect_op))?;
             let mut e = Event::new(Kind::Connected, connect_op);
             e.session_present = ack.session_present;
             emit(queue, e).map_err(|e| (e, connect_op))?;
@@ -417,8 +474,15 @@ fn process_event(
         }
         EngineEvent::Outgoing(Outgoing::Disconnect) => {
             let op = active.as_ref().map_or(0, Command::op);
-            state.store(0, Ordering::SeqCst);
-            emit(queue, Event::new(Kind::Disconnected, op)).map_err(|e| (e, op))?;
+            let mut q = queue.lock().map_err(|_| (Error::Internal, op))?;
+            if q.sealed {
+                return Err((Error::Closed, op));
+            }
+            for id in std::mem::take(&mut q.disconnects) {
+                q.push(Event::new(Kind::Disconnected, id))
+                    .map_err(|e| (e, id))?;
+            }
+            let _ = state.compare_exchange(3, 0, Ordering::SeqCst, Ordering::SeqCst);
             return Ok(true);
         }
         _ => {}
@@ -451,5 +515,58 @@ mod boundary_tests {
             assert_eq!(result, Err((expected, 0)));
             assert!(q.lock().unwrap().items.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod close_seal_tests {
+    use super::*;
+    use mqtt_api::Error;
+
+    fn with_runtime<T>(f: impl FnOnce() -> T) -> T {
+        mqtt_runtime::init().unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        let _ = mqtt_runtime::shutdown();
+        match result {
+            Ok(v) => v,
+            Err(p) => std::panic::resume_unwind(p),
+        }
+    }
+
+    #[test]
+    fn peek_and_pop_return_closed_after_empty_close() {
+        with_runtime(|| {
+            let mut c = Client::new().unwrap();
+            assert_eq!(c.peek().unwrap_err(), Error::Empty);
+            c.close().unwrap();
+            c.close().unwrap();
+            assert_eq!(c.peek().unwrap_err(), Error::Closed);
+            assert_eq!(c.pop().unwrap_err(), Error::Closed);
+        });
+    }
+
+    #[test]
+    fn close_discards_queued_events_and_rejects_late_producers() {
+        with_runtime(|| {
+            let mut c = Client::new().unwrap();
+            let mut message = Event::new(Kind::Message, 1);
+            message.topic = b"x".to_vec();
+            message.payload = b"!".to_vec();
+            emit(&c.events, message).unwrap();
+            assert_eq!(c.peek().unwrap().kind, Kind::Message);
+            c.close().unwrap();
+            assert_eq!(c.peek().unwrap_err(), Error::Closed);
+            assert_eq!(c.pop().unwrap_err(), Error::Closed);
+            assert_eq!(
+                emit(&c.events, Event::new(Kind::Message, 2)).unwrap_err(),
+                Error::Closed
+            );
+            assert_eq!(c.peek().unwrap_err(), Error::Closed);
+            assert_eq!(
+                c.connect(1, Options::new("127.0.0.1", "closed", 1883))
+                    .unwrap_err(),
+                Error::Closed
+            );
+        });
     }
 }

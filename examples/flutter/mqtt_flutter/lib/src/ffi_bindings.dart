@@ -233,6 +233,8 @@ class MqttBindings {
           ffi.Pointer<ffi.Uint8>, int)>();
 
   /// Prototype force-close, idempotent; aborts pending work. No graceful drain promise.
+  /// After a successful close, the handle stays Closed until free; poll and other
+  /// operations except repeated close/free return Closed and cannot deliver events.
   int mqtt_client_close(
     int handle,
   ) {

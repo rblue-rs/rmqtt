@@ -37,7 +37,11 @@ fn boundary(f: impl FnOnce() -> Result<(), Error>) -> i32 {
 }
 fn entry(handle: u64, f: impl FnOnce(&mut Entry) -> Result<(), Error>) -> Result<(), Error> {
     let mut store = CLIENTS.lock().map_err(|_| Error::Internal)?;
-    f(store.1.get_mut(&handle).ok_or(Error::Closed)?)
+    let e = store.1.get_mut(&handle).ok_or(Error::Closed)?;
+    if e.closed {
+        return Err(Error::Closed);
+    }
+    f(e)
 }
 unsafe fn bytes<'a>(p: *const u8, len: usize, max: usize) -> Result<&'a [u8], Error> {
     if len > max || len > isize::MAX as usize || (p.is_null() && len != 0) {
@@ -234,14 +238,15 @@ pub unsafe extern "C" fn mqtt_client_poll(
     })
 }
 /// Prototype force-close, idempotent; aborts pending work. No graceful drain promise.
+/// After a successful close, the handle stays Closed until free; poll and other
+/// operations except repeated close/free return Closed and cannot deliver events.
 #[no_mangle]
 pub extern "C" fn mqtt_client_close(handle: u64) -> i32 {
     boundary(|| {
-        entry(handle, |e| {
-            e.client.close()?;
-            e.closed = true;
-            Ok(())
-        })
+        let mut s = CLIENTS.lock().map_err(|_| Error::Internal)?;
+        let e = s.1.get_mut(&handle).ok_or(Error::Closed)?;
+        e.closed = true;
+        e.client.close()
     })
 }
 /// Idempotent numeric-handle release. Must close first. Never dereferences a handle.

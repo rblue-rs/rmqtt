@@ -14,6 +14,15 @@ int main(void) {
  const char *port=getenv("MQTT_TEST_PORT");assert(port);uint64_t h=0;
  assert(mqtt_runtime_init()==0);
  assert(mqtt_client_new((const uint8_t*)"127.0.0.1",9,(const uint8_t*)"c-smoke",7,(uint16_t)atoi(port),&h)==0);
+ MqttEvent untouched;memset(&untouched,0xa5,sizeof(untouched));
+ MqttEvent snapshot;memcpy(&snapshot,&untouched,sizeof(snapshot));
+ uint8_t empty_t[2]={0xaa,0xaa},empty_p[2]={0xbb,0xbb};
+ assert(mqtt_client_poll(h,&untouched,empty_t,2,empty_p,2)==10);
+ assert(memcmp(&untouched,&snapshot,sizeof(untouched))==0);
+ assert(empty_t[0]==0xaa && empty_t[1]==0xaa && empty_p[0]==0xbb && empty_p[1]==0xbb);
+ assert(mqtt_client_poll(h,NULL,NULL,0,NULL,0)==1);
+ assert(mqtt_client_poll(h,&untouched,NULL,1,NULL,0)==1);
+ assert(mqtt_client_publish(h,1,(const uint8_t*)"x",1,NULL,1,0,0)==1);
  assert(mqtt_client_connect(h,1,4,0)==0);
  MqttEvent e=wait_kind(h,1);assert(e.operation_id==1);assert(!e.session_present);
  assert(mqtt_client_subscribe(h,2,(const uint8_t*)"slice/c",7,1)==0);

@@ -97,6 +97,8 @@ int32_t mqtt_client_poll(uint64_t handle,
 
 /**
  * Prototype force-close, idempotent; aborts pending work. No graceful drain promise.
+ * After a successful close, the handle stays Closed until free; poll and other
+ * operations except repeated close/free return Closed and cannot deliver events.
  */
 int32_t mqtt_client_close(uint64_t handle);
 

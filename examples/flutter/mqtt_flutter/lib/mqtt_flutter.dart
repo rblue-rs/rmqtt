@@ -13,7 +13,13 @@ enum MqttQos { atMostOnce, atLeastOnce }
 
 enum MqttProtocol { v311, v5 }
 
-enum MqttConnectionState { disconnected, connecting, connected, closed }
+enum MqttConnectionState {
+  disconnected,
+  connecting,
+  connected,
+  closed,
+  disconnecting
+}
 
 enum MqttPublishStage { queued, sent, acknowledged }
 
@@ -22,6 +28,32 @@ class MqttException implements Exception {
   const MqttException(this.code);
   @override
   String toString() => 'MqttException(code: $code)';
+}
+
+/// Local waiting was abandoned. No MQTT packet is withdrawn.
+class MqttOperationCancelled extends StateError {
+  final int operationId;
+  MqttOperationCancelled(this.operationId)
+      : super('Operation $operationId cancelled');
+}
+
+/// A caller-owned local wait. Cancelling never withdraws an MQTT packet.
+/// Each beginX call has its own id and Future, including joined disconnects.
+class MqttOperation<T> {
+  final int operationId;
+  final Future<T> future;
+  final Future<void> Function() _cancel;
+  MqttOperation._(this.operationId, this.future, this._cancel);
+
+  /// Idempotent, including after completion/timeout/close. Only this wait ends.
+  Future<void> cancel() => _cancel();
+}
+
+class _ControlWaiter {
+  final bool sharedDisconnect;
+  final void Function(Object, StackTrace?) fail;
+  bool cancelled = false;
+  _ControlWaiter(this.sharedDisconnect, this.fail);
 }
 
 class MqttConnectOptions {
@@ -195,6 +227,13 @@ class MqttClient {
   int _handle = 0;
   int _operation = 0;
   Timer? _timer;
+  int _generation = 0;
+  Future<void>? _disconnectFuture;
+  int? _disconnectPhysicalId;
+  int _disconnectWaiterSlots = 0;
+  final Map<int, Timer> _timeouts = {};
+  final Map<int, _ControlWaiter> _controlWaiters = {};
+  final Map<int, _ControlWaiter> _starting = {};
   Pointer<MqttEvent> _event = nullptr;
   Pointer<Uint8> _topic = nullptr;
   Pointer<Uint8> _payload = nullptr;
@@ -209,10 +248,13 @@ class MqttClient {
     return ++_operation;
   }
 
-  Future<void> _create() async {
+  Future<void> _create(int generation) async {
     if (_handle != 0) return;
     await ensureInitialized();
     _openGuard();
+    if (generation != _generation) {
+      throw StateError('Connection attempt stopped');
+    }
     using((arena) {
       final host = utf8.encode(server), id = utf8.encode(clientId);
       final hp = arena<Uint8>(host.length),
@@ -230,21 +272,114 @@ class MqttClient {
     _timer = Timer.periodic(const Duration(milliseconds: 5), (_) => _poll());
   }
 
-  Future<Object?> _request(int op, int Function() send, Duration? timeout) {
+  MqttOperation<T> _begin<T>(Future<T> Function(int) launch,
+      {bool sharedDisconnect = false}) {
+    final op = _next();
+    final completion = _completer<T>();
+    if (sharedDisconnect) {
+      // A cancelled caller still has a join continuation until the attempt ends.
+      // Do not allow cancel/rejoin loops to accumulate unbounded continuations.
+      if (_disconnectWaiterSlots >= 32) {
+        completion.completeError(const MqttException(5));
+        return MqttOperation<T>._(op, completion.future, () async {});
+      }
+      _disconnectWaiterSlots++;
+    }
+    final waiter = _ControlWaiter(sharedDisconnect, (error, stack) {
+      if (!completion.isCompleted) completion.completeError(error, stack);
+    });
+    // Register before launching: synchronous listeners can close/reenter.
+    _controlWaiters[op] = waiter;
+    if (!sharedDisconnect) _starting[op] = waiter;
+    Future<T>.sync(() => launch(op)).then<void>((value) {
+      if (sharedDisconnect) _disconnectWaiterSlots--;
+      _controlWaiters.remove(op);
+      _starting.remove(op);
+      if (!completion.isCompleted) completion.complete(value);
+    }, onError: (Object error, StackTrace stack) {
+      if (sharedDisconnect) _disconnectWaiterSlots--;
+      _controlWaiters.remove(op);
+      _starting.remove(op);
+      waiter.fail(error, stack);
+    });
+    return MqttOperation<T>._(op, completion.future, () async {
+      if (_closed || !_controlWaiters.containsKey(op)) return;
+      await cancel(op);
+    });
+  }
+
+  // A native result/deadline wins before a later synchronous listener can close.
+  // All registered disconnect callers commit with their shared attempt.
+  void _commitControl(int op) {
+    if (_disconnectPhysicalId == op) {
+      _controlWaiters.removeWhere((_, waiter) => waiter.sharedDisconnect);
+    } else {
+      _controlWaiters.remove(op);
+    }
+  }
+
+  Future<Object?> _request(int op, int Function() send, Duration? timeout,
+      {void Function(Object)? onTimeout}) {
     final c = _completer<Object?>();
+    final starting = _starting.remove(op);
     _operations[op] = c;
     try {
       _check(send());
-    } catch (_) {
+      if (starting?.cancelled ?? false) {
+        _operations.remove(op);
+        c.completeError(MqttOperationCancelled(op));
+        return c.future;
+      }
+      _timeouts[op] = Timer(timeout ?? const Duration(seconds: 10), () {
+        _timeouts.remove(op);
+        if (_operations.remove(op) != c || c.isCompleted) return;
+        final error = TimeoutException('Operation $op timed out', timeout);
+        _commitControl(op);
+        c.completeError(error);
+        onTimeout?.call(error);
+      });
+    } catch (error) {
       _operations.remove(op);
-      rethrow;
+      _commitControl(op);
+      c.completeError(error);
     }
-    return c.future.timeout(timeout ?? const Duration(seconds: 10));
+    return c.future;
+  }
+
+  /// Abandon local waiting only. Late protocol progress can still be observed.
+  /// Unknown/already terminal ids are harmless; a closed client rejects cancel.
+  Future<void> cancel(int operationId) async {
+    _openGuard();
+    if (operationId <= 0) throw ArgumentError.value(operationId, 'operationId');
+    final error = MqttOperationCancelled(operationId);
+    final waiter = _controlWaiters.remove(operationId);
+    if (waiter != null) {
+      waiter.cancelled = true;
+      waiter.fail(error, null);
+      // The first caller's deadline/transport belongs to the shared attempt.
+      if (waiter.sharedDisconnect) return;
+    }
+    // The physical attempt can still use the first caller's id after that
+    // caller has left. Repeated cancel(id) must not reach its native waiter.
+    if (_disconnectPhysicalId == operationId) return;
+    _timeouts.remove(operationId)?.cancel();
+    final c = _operations.remove(operationId);
+    if (c != null && !c.isCompleted) c.completeError(error);
+    _tickets.remove(operationId)?._fail(error);
   }
 
   Future<MqttConnectionStatus> connect(
-      {MqttConnectOptions options = const MqttConnectOptions(),
-      Duration? timeout}) async {
+          {MqttConnectOptions options = const MqttConnectOptions(),
+          Duration? timeout}) async =>
+      beginConnect(options: options, timeout: timeout).future;
+
+  MqttOperation<MqttConnectionStatus> beginConnect(
+          {MqttConnectOptions options = const MqttConnectOptions(),
+          Duration? timeout}) =>
+      _begin((op) => _connect(op, options, timeout));
+
+  Future<MqttConnectionStatus> _connect(
+      int op, MqttConnectOptions options, Duration? timeout) async {
     _openGuard();
     if (_state != MqttConnectionState.disconnected) {
       throw StateError('Already connecting/connected');
@@ -255,12 +390,12 @@ class MqttClient {
         options.keepAlivePeriod.inSeconds > 65535) {
       throw ArgumentError('Keepalive requires whole seconds in 0..65535');
     }
+    final generation = _generation;
     _state = MqttConnectionState.connecting;
     _events.add(MqttClientEvent(_state));
     try {
-      await _create();
+      await _create(generation);
       _openGuard();
-      final op = _next();
       return (await _request(
           op,
           () => _ffi.mqtt_client_connect(
@@ -270,15 +405,31 @@ class MqttClient {
               options.keepAlivePeriod.inSeconds),
           timeout)) as MqttConnectionStatus;
     } catch (error) {
-      if (!_closed) _state = MqttConnectionState.disconnected;
-      if (error is TimeoutException) _releaseNative(error);
+      if (error is TimeoutException && generation == _generation) {
+        _releaseNative(error);
+      }
+      if (!_closed &&
+          error is! MqttOperationCancelled &&
+          generation == _generation) {
+        _state = MqttConnectionState.disconnected;
+      }
+      if (!_closed && error is TimeoutException) {
+        _state = MqttConnectionState.disconnected;
+      }
       rethrow;
     }
   }
 
   Future<MqttSubscribeAck> subscribe(String topic,
-      {MqttQos qos = MqttQos.atLeastOnce, Duration? timeout}) async {
-    final op = _next();
+          {MqttQos qos = MqttQos.atLeastOnce, Duration? timeout}) async =>
+      beginSubscribe(topic, qos: qos, timeout: timeout).future;
+
+  MqttOperation<MqttSubscribeAck> beginSubscribe(String topic,
+          {MqttQos qos = MqttQos.atLeastOnce, Duration? timeout}) =>
+      _begin((op) => _subscribe(op, topic, qos, timeout));
+
+  Future<MqttSubscribeAck> _subscribe(
+      int op, String topic, MqttQos qos, Duration? timeout) async {
     return (await _request(
         op,
         () => _withTopic(
@@ -289,8 +440,15 @@ class MqttClient {
   }
 
   Future<MqttUnsubscribeAck> unsubscribe(String topic,
-      {Duration? timeout}) async {
-    final op = _next();
+          {Duration? timeout}) async =>
+      beginUnsubscribe(topic, timeout: timeout).future;
+
+  MqttOperation<MqttUnsubscribeAck> beginUnsubscribe(String topic,
+          {Duration? timeout}) =>
+      _begin((op) => _unsubscribe(op, topic, timeout));
+
+  Future<MqttUnsubscribeAck> _unsubscribe(
+      int op, String topic, Duration? timeout) async {
     return (await _request(
         op,
         () => _withTopic(topic,
@@ -327,11 +485,72 @@ class MqttClient {
     return ticket;
   }
 
-  Future<void> disconnect({Duration? timeout}) async {
+  /// Concurrent callers share one attempt and its first caller's deadline.
+  /// Timeout force-stops the transport, but leaves this Dart client reusable.
+  Future<void> disconnect({Duration? timeout}) async =>
+      beginDisconnect(timeout: timeout).future;
+
+  /// Each caller can cancel its own wait without cancelling other callers.
+  /// The first attempt's deadline remains active even if all callers cancel.
+  MqttOperation<void> beginDisconnect({Duration? timeout}) =>
+      _begin((op) => _joinDisconnect(op, timeout), sharedDisconnect: true);
+
+  Future<void> _joinDisconnect(int op, Duration? timeout) async {
     _openGuard();
+    final existing = _disconnectFuture;
+    if (existing != null) return existing;
     if (_state == MqttConnectionState.disconnected) return;
-    final op = _next();
-    await _request(op, () => _ffi.mqtt_client_disconnect(_handle, op), timeout);
+    final completion = _completer<void>();
+    final attempt = completion.future;
+    // Publish the shared attempt before any synchronous listener can reenter.
+    _disconnectFuture = attempt;
+    _disconnectPhysicalId = op;
+    try {
+      await _disconnect(op, timeout);
+      completion.complete();
+    } catch (error, stack) {
+      completion.completeError(error, stack);
+    } finally {
+      if (identical(_disconnectFuture, attempt)) {
+        _disconnectFuture = null;
+        _disconnectPhysicalId = null;
+      }
+    }
+    return attempt;
+  }
+
+  Future<void> _disconnect(int op, Duration? timeout) async {
+    if (_state == MqttConnectionState.connecting) {
+      _releaseNative(StateError('Connection attempt disconnected'),
+          preserveDisconnectWaiters: true);
+      _state = MqttConnectionState.disconnected;
+      _events.add(MqttClientEvent(_state));
+      return;
+    }
+    _state = MqttConnectionState.disconnecting;
+    // Register before emitting to support reentrant close/cancel listeners.
+    final pending =
+        _request(op, () => _ffi.mqtt_client_disconnect(_handle, op), timeout,
+            onTimeout: (error) {
+      _releaseNative(error);
+      if (!_closed) {
+        _state = MqttConnectionState.disconnected;
+        _events.add(MqttClientEvent(_state));
+      }
+    });
+    _events.add(MqttClientEvent(_state));
+    try {
+      await pending;
+    } catch (error) {
+      if (!_closed &&
+          error is! MqttOperationCancelled &&
+          _state == MqttConnectionState.disconnecting) {
+        _releaseNative(error);
+        _state = MqttConnectionState.disconnected;
+        _events.add(MqttClientEvent(_state));
+      }
+      rethrow;
+    }
   }
 
   void _poll() {
@@ -379,15 +598,17 @@ class MqttClient {
             _status = MqttConnectionStatus(e.session_present != 0);
             value = _status;
             _state = MqttConnectionState.connected;
-            _events.add(MqttClientEvent(_state));
           }
           if (kind == 2) value = MqttSubscribeAck(op, MqttQos.values[e.qos]);
           if (kind == 9) value = MqttUnsubscribeAck(op);
+          final c = _operations.remove(op);
+          _commitControl(op);
+          _timeouts.remove(op)?.cancel();
           if (kind == 7) {
             _state = MqttConnectionState.disconnected;
-            _events.add(MqttClientEvent(_state));
+            _failPending(StateError('Client disconnected'),
+                preserveDisconnectWaiters: true);
           }
-          final c = _operations.remove(op);
           if (c != null && !c.isCompleted) {
             if (error == 0) {
               c.complete(value);
@@ -395,6 +616,7 @@ class MqttClient {
               c.completeError(MqttException(error));
             }
           }
+          if (kind == 1 || kind == 7) _events.add(MqttClientEvent(_state));
         }
       }
     } catch (error) {
@@ -406,7 +628,16 @@ class MqttClient {
     }
   }
 
-  void _failPending(Object error) {
+  void _failPending(Object error, {bool preserveDisconnectWaiters = false}) {
+    for (final entry in _controlWaiters.entries.toList()) {
+      if (preserveDisconnectWaiters && entry.value.sharedDisconnect) continue;
+      _controlWaiters.remove(entry.key);
+      entry.value.fail(error, null);
+    }
+    for (final t in _timeouts.values) {
+      t.cancel();
+    }
+    _timeouts.clear();
     for (final c in _operations.values) {
       if (!c.isCompleted) c.completeError(error);
     }
@@ -417,7 +648,8 @@ class MqttClient {
     _tickets.clear();
   }
 
-  void _releaseNative(Object error) {
+  void _releaseNative(Object error, {bool preserveDisconnectWaiters = false}) {
+    _generation++;
     _timer?.cancel();
     _timer = null;
     if (_handle != 0) {
@@ -434,11 +666,11 @@ class MqttClient {
       _topic = nullptr;
       _payload = nullptr;
     }
-    _failPending(error);
+    _failPending(error, preserveDisconnectWaiters: preserveDisconnectWaiters);
   }
 
   /// Prototype force-close: stops polling and rejects pending work, not graceful drain.
-  Future<void> close({Duration? timeout}) async {
+  Future<void> close() async {
     if (_closed) return;
     _closed = true;
     _state = MqttConnectionState.closed;
