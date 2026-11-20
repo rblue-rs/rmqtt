@@ -58,12 +58,64 @@ class _ControlWaiter {
   _ControlWaiter(this.sharedDisconnect, this.fail);
 }
 
+class MqttWill {
+  final String topic;
+  final Uint8List payload;
+  final MqttQos qos;
+  final bool retain;
+  MqttWill(
+      {required this.topic,
+      required this.payload,
+      this.qos = MqttQos.atMostOnce,
+      this.retain = false});
+
+  @override
+  String toString() =>
+      'MqttWill(topic: $topic, payloadLength: ${payload.length}, qos: $qos, retain: $retain)';
+}
+
 class MqttConnectOptions {
   final Duration keepAlivePeriod;
   final MqttProtocol protocol;
+
+  /// Use TLS with certificate chain and hostname verification.
+  /// There is no skip-verify / insecure switch.
+  final bool useTls;
+
+  /// PEM-encoded CA certificates. `null` with [useTls] trusts host system
+  /// roots. A provided value is trusted exclusively; system roots are not mixed
+  /// in. Empty or invalid PEM is rejected rather than falling back.
+  final String? caPem;
+  final String? username;
+  final String? password;
+
+  /// When true, a password may be sent on plaintext TCP. Default false.
+  /// TLS connections may send a password without this switch.
+  final bool allowPlaintextCredentials;
+  final MqttWill? will;
+
+  /// PEM-encoded client certificate chain. Must be paired with
+  /// [clientKeyPem] and [useTls].
+  final String? clientCertPem;
+
+  /// PEM-encoded client private key. Must be paired with [clientCertPem]
+  /// and [useTls]. Held only in memory; redacted from [toString].
+  final String? clientKeyPem;
   const MqttConnectOptions(
       {this.keepAlivePeriod = Duration.zero,
-      this.protocol = MqttProtocol.v311});
+      this.protocol = MqttProtocol.v311,
+      this.useTls = false,
+      this.caPem,
+      this.username,
+      this.password,
+      this.allowPlaintextCredentials = false,
+      this.will,
+      this.clientCertPem,
+      this.clientKeyPem});
+
+  @override
+  String toString() =>
+      'MqttConnectOptions(keepAlivePeriod: $keepAlivePeriod, protocol: $protocol, useTls: $useTls, caPem: ${caPem == null ? 'null' : '<redacted>'}, username: $username, password: ${password == null ? 'null' : '<redacted>'}, allowPlaintextCredentials: $allowPlaintextCredentials, will: $will, clientCertPem: ${clientCertPem == null ? 'null' : '<redacted>'}, clientKeyPem: ${clientKeyPem == null ? 'null' : '<redacted>'})';
 }
 
 class MqttConnectionStatus {
@@ -358,6 +410,61 @@ class MqttClient implements Finalizable {
         options.keepAlivePeriod.inSeconds > 65535) {
       throw ArgumentError('Keepalive requires whole seconds in 0..65535');
     }
+    if (options.caPem != null && !options.useTls) {
+      throw ArgumentError('Custom CA requires useTls');
+    }
+    if ((options.clientCertPem != null || options.clientKeyPem != null) &&
+        !options.useTls) {
+      throw ArgumentError('Client certificate requires useTls');
+    }
+    if (options.useTls && options.caPem != null) {
+      final bytes = utf8.encode(options.caPem!);
+      if (bytes.isEmpty || bytes.contains(0) || bytes.length > 65536) {
+        throw const MqttException(1);
+      }
+    }
+    final hasClientCert = options.clientCertPem != null;
+    final hasClientKey = options.clientKeyPem != null;
+    if (hasClientCert != hasClientKey) {
+      throw const MqttException(21);
+    }
+    if (hasClientCert) {
+      final certBytes = utf8.encode(options.clientCertPem!);
+      final keyBytes = utf8.encode(options.clientKeyPem!);
+      if (certBytes.isEmpty ||
+          certBytes.contains(0) ||
+          certBytes.length > 65536 ||
+          keyBytes.isEmpty ||
+          keyBytes.contains(0) ||
+          keyBytes.length > 65536) {
+        throw const MqttException(1);
+      }
+    }
+    if (options.password != null && options.username == null) {
+      throw const MqttException(1);
+    }
+    if (options.password != null &&
+        !options.useTls &&
+        !options.allowPlaintextCredentials) {
+      throw const MqttException(18);
+    }
+    if (options.username != null &&
+        (options.username!.isEmpty || options.username!.contains('\u0000'))) {
+      throw const MqttException(1);
+    }
+    if (options.password != null && options.password!.contains('\u0000')) {
+      throw const MqttException(1);
+    }
+    final will = options.will;
+    if (will != null) {
+      if (will.topic.isEmpty ||
+          will.topic.contains('\u0000') ||
+          will.topic.contains('#') ||
+          will.topic.contains('+') ||
+          will.payload.length > 65536) {
+        throw const MqttException(1);
+      }
+    }
     final generation = _generation;
     _state = MqttConnectionState.connecting;
     _events.add(MqttClientEvent(_state));
@@ -366,11 +473,85 @@ class MqttClient implements Finalizable {
       _openGuard();
       return (await _request(
           op,
-          () => _ffi.mqtt_client_connect(
-              _handle,
-              op,
-              options.protocol == MqttProtocol.v311 ? 4 : 5,
-              options.keepAlivePeriod.inSeconds),
+          () => using((arena) {
+                Pointer<Uint8> writeBytes(List<int> bytes) {
+                  if (bytes.isEmpty) {
+                    return nullptr;
+                  }
+                  final ptr = arena<Uint8>(bytes.length);
+                  ptr.asTypedList(bytes.length).setAll(0, bytes);
+                  return ptr;
+                }
+
+                Pointer<Uint8> pemPtr = nullptr;
+                var pemLen = 0;
+                if (options.useTls && options.caPem != null) {
+                  final bytes = utf8.encode(options.caPem!);
+                  pemPtr = writeBytes(bytes);
+                  pemLen = bytes.length;
+                }
+                final usernameBytes = options.username == null
+                    ? null
+                    : utf8.encode(options.username!);
+                final passwordBytes = options.password == null
+                    ? null
+                    : utf8.encode(options.password!);
+                final clientCertBytes = options.clientCertPem == null
+                    ? null
+                    : utf8.encode(options.clientCertPem!);
+                final clientKeyBytes = options.clientKeyPem == null
+                    ? null
+                    : utf8.encode(options.clientKeyPem!);
+                final will = options.will;
+                final willTopic = will == null ? null : utf8.encode(will.topic);
+                final passwordPtr =
+                    passwordBytes == null ? nullptr : writeBytes(passwordBytes);
+                final clientCertPtr = clientCertBytes == null
+                    ? nullptr
+                    : writeBytes(clientCertBytes);
+                final clientKeyPtr = clientKeyBytes == null
+                    ? nullptr
+                    : writeBytes(clientKeyBytes);
+                try {
+                  return _ffi.mqtt_client_connect(
+                      _handle,
+                      op,
+                      options.protocol == MqttProtocol.v311 ? 4 : 5,
+                      options.keepAlivePeriod.inSeconds,
+                      options.useTls ? 1 : 0,
+                      pemPtr,
+                      pemLen,
+                      usernameBytes == null
+                          ? nullptr
+                          : writeBytes(usernameBytes),
+                      usernameBytes?.length ?? 0,
+                      passwordPtr,
+                      passwordBytes?.length ?? 0,
+                      options.allowPlaintextCredentials ? 1 : 0,
+                      willTopic == null ? nullptr : writeBytes(willTopic),
+                      willTopic?.length ?? 0,
+                      will == null ? nullptr : writeBytes(will.payload),
+                      will?.payload.length ?? 0,
+                      will?.qos.index ?? 0,
+                      (will?.retain ?? false) ? 1 : 0,
+                      clientCertPtr,
+                      clientCertBytes?.length ?? 0,
+                      clientKeyPtr,
+                      clientKeyBytes?.length ?? 0);
+                } finally {
+                  void zero(Pointer<Uint8> ptr, List<int>? bytes) {
+                    if (ptr != nullptr && bytes != null && bytes.isNotEmpty) {
+                      ptr
+                          .asTypedList(bytes.length)
+                          .fillRange(0, bytes.length, 0);
+                    }
+                  }
+
+                  zero(clientKeyPtr, clientKeyBytes);
+                  zero(clientCertPtr, clientCertBytes);
+                  zero(passwordPtr, passwordBytes);
+                }
+              }),
           timeout)) as MqttConnectionStatus;
     } catch (error) {
       if (error is TimeoutException && generation == _generation) {

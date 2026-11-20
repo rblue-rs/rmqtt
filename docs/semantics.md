@@ -2,8 +2,27 @@
 
 ## 可用范围
 
-MQTT 3.1.1 TCP、clean session=true、QoS0/1。默认协议 Keep Alive=0，显式整秒
+MQTT 3.1.1 TCP 与主机 TLS、clean session=true、QoS0/1。默认协议 Keep Alive=0，显式整秒
 1..65535 可设；非整秒和溢出值拒绝，不截断。0 不关闭 TCP keepalive，也不是后台保活。
+启用 TLS 时默认校验证书链与主机名，不提供 skip-verify / onBadCertificate / insecure。
+未提供自定义 CA PEM 时信任**本机**系统根证书；一旦提供自定义 CA PEM，则只信任该 CA，
+不再混入系统根。空或非法 PEM 被拒绝，不会回退到系统根或明文。仅宣称 Linux 主机 TLS/mTLS，
+不宣称 Android/iOS 系统信任根。
+客户端证书链与私钥以内存 PEM 传入（Dart `clientCertPem` / `clientKeyPem`，
+Rust `client_cert_pem` / `client_key_pem`）。必须启用 TLS；证书与私钥必须成对。
+未启用 TLS 却提供证书/私钥返回 `InvalidArgument`(1)；不成对返回
+`CertificateKeyMismatch`(21)；PEM 无法解析返回 `InvalidClientCertificate`(20)。
+不会静默忽略或回退成无客户端证书的 TLS。broker 要求客户端证书但未提供、或证书
+不受信任时，握手失败为 `Tls`(14)。私钥不落盘、不入仓库、不出现在日志、错误、
+Debug、Dart `toString` 或事件中。close 后尽力清理内存中的副本，但不宣称安全擦除。
+用户名和密码可通过 Options 提供。TLS 上可以直接发送密码；明文 TCP 默认拒绝携带密码，
+必须显式设置 `allow_plaintext_credentials` / Dart `allowPlaintextCredentials` 才发送。
+未允许时返回 `PlaintextCredentials`(18)，不会静默丢掉密码或改走无密码连接。
+CONNACK 认证拒绝（Bad User Name or Password / Not Authorized）映射为
+`BadCredentials`(19)，首次失败不重试。密码不出现在日志、错误、Debug 或事件文本中。
+已实现 MQTT 3.1.1 基础 Last Will（topic、payload、QoS 0/1、retain），并有异常断开后
+由 broker 投递以及 retain 的测试。Will QoS 2 返回 `Unsupported`(6)。不做 MQTT 5 Will
+properties。
 rumqttc 0.25.1 原始 v5 setter 对小于 5 秒 panic；v3 允许0，eventloop 对0不创建心跳定时器。
 测试包含实际 CONNECT 字段0、1，无默认 PING 的1.4秒观察，以及显式1秒 PINGREQ。
 v5 一律返回 typed Unsupported(6)，没有 fork、patch 或暗改 keepalive。
@@ -36,12 +55,24 @@ v5 一律返回 typed Unsupported(6)，没有 fork、patch 或暗改 keepalive�
 
 0 OK；1 InvalidArgument；2 NotInitialized；3 Closed；4 Busy；5 QueueFull；6 Unsupported；
 7 Network；8 Refused；9 BufferTooSmall；10 Empty；11 Internal；12 Overflow；13 Timeout（预留，
-Dart 等待超时当前是 TimeoutException）。C poll 不等待网络或事件，但内部互斥锁可能争用；不是 lock-free / wait-free。无日志口令、私钥或 payload。
+Dart 等待超时当前是 TimeoutException）；14 Tls（握手/协议失败，例如对明文端口使用 TLS）；
+15 CertificateUntrusted（证书链不受信任，含未知颁发者）；16 HostnameMismatch（证书与
+`server` 主机名/IP 不匹配）；17 CertificateExpired（证书过期或尚未生效）；
+18 PlaintextCredentials（明文 TCP 携带密码但未显式允许）；19 BadCredentials（CONNACK
+认证拒绝）；20 InvalidClientCertificate（客户端证书或私钥 PEM 无法解析）；
+21 CertificateKeyMismatch（证书与私钥不成对，含只提供其中一项，或可解析但不匹配）。
+其他 CONNACK 拒绝原因仍为 Refused(8)。
+C poll 不等待网络或事件，但内部互斥锁可能争用；不是 lock-free / wait-free。无日志口令、私钥、
+证书 PEM 或 payload。Options Debug 与 Dart `MqttConnectOptions.toString` 对 CA PEM、
+客户端证书/私钥和密码脱敏。
 
 ## 缺失不是降级
 
-TLS/WS/V5/重连/credentials 等尚未暴露在当前 Options 中，不能误认为这些选项会被忽略
-并降级。最终 API 尚未冻结。任何移动端能力必须另跑交叉构建、模拟器、真机验证后再陈述。
+WS/V5/重连等尚未暴露在当前 Options 中，不能误认为这些选项会被忽略
+并降级。启用 TLS 失败时不会静默改走明文。明文携带密码且未显式允许时不会改走无密码连接。
+提供客户端证书却未启用 TLS、或证书与私钥不成对时，不会改走无客户端证书的 TLS。
+最终 API 尚未冻结。任何移动端能力必须另跑
+交叉构建、模拟器、真机验证后再陈述；主机 TLS/mTLS 成功不等于移动端信任根可用。
 
 ## 生命周期
 
@@ -90,7 +121,7 @@ QoS0 `whenAcknowledged == null`，不伪造 ACK。成功的 Queued/Sent 不会�
 
 ### 错误映射与取消接口
 
-实验 ABI 状态码仍是上文 0–13，既有 event/option layout 不变。新增 ownership helper 见 ownership.md。native 非零业务错误 →
+实验 ABI 状态码仍是上文 0–21，既有 event/option layout 不变。新增 ownership helper 见 ownership.md。native 非零业务错误 →
 `MqttException(code)`；Dart 自有 deadline 仍为 `TimeoutException`（不冒用 native 预留13）；
 已关闭/不当状态/本地断开结算仍保留既有 `StateError`；本地取消用其子类
 `MqttOperationCancelled(operationId)`，不增加 native Cancelled code。统一改成全套

@@ -73,7 +73,33 @@ fn closed_handle_must_not_deliver_a_retained_message() {
             ),
             0
         );
-        assert_eq!(mqtt_client_connect(h, 1, 4, 0), 0);
+        assert_eq!(
+            mqtt_client_connect(
+                h,
+                1,
+                4,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0
+            ),
+            0
+        );
         let mut event = MqttEvent::default();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {

@@ -15,7 +15,7 @@ fn refused_connack_has_no_automatic_retry() {
     let server = std::thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();
         packet(&mut socket);
-        socket.write_all(&[0x20, 2, 0, 5]).unwrap();
+        socket.write_all(&[0x20, 2, 0, 3]).unwrap();
         drop(socket);
         listener.set_nonblocking(true).unwrap();
         let until = Instant::now() + Duration::from_millis(200);

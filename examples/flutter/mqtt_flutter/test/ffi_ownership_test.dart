@@ -84,13 +84,13 @@ void main() {
     }
   });
   test('owner isolate exit must release its native handle', () async {
-    // Use a child OS process to isolate owner-exit cleanup and runtime state.
-    // A cleanup regression must fail without poisoning this test runner.
+    // Isolation is essential: the prototype intentionally leaks in this probe.
+    // Keep the desired cleanup assertion RED, without poisoning this test runner.
     final result = await Process.run(Platform.resolvedExecutable, [
       'run',
       'test/probes/isolate_exit_probe.dart'
     ]).timeout(const Duration(seconds: 15));
     expect(result.exitCode, 0,
-        reason: 'Owner-isolate leak: ${result.stdout}${result.stderr}');
+        reason: 'owner-isolate leak: ${result.stdout}${result.stderr}');
   });
 }

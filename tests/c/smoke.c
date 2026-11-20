@@ -44,7 +44,7 @@ int main(void) {
  assert(mqtt_client_poll(h,NULL,NULL,0,NULL,0)==1);
  assert(mqtt_client_poll(h,&untouched,NULL,1,NULL,0)==1);
  assert(mqtt_client_publish(h,1,(const uint8_t*)"x",1,NULL,1,0,0)==1);
- assert(mqtt_client_connect(h,1,4,0)==0);
+ assert(mqtt_client_connect(h,1,4,0,0,NULL,0,NULL,0,NULL,0,0,NULL,0,NULL,0,0,0,NULL,0,NULL,0)==0);
  MqttEvent e=wait_kind(h,1);assert(e.operation_id==1);assert(!e.session_present);
  assert(mqtt_client_subscribe(h,2,(const uint8_t*)"slice/c",7,1)==0);
  e=wait_kind(h,2);assert(e.operation_id==2);assert(e.qos==1);
@@ -73,7 +73,7 @@ int main(void) {
  }
  assert(queued&&sent&&acked&&message);
  assert(mqtt_client_disconnect(h,4)==0);e=wait_kind(h,7);assert(e.operation_id==4);
- assert(mqtt_client_connect(h,5,4,0)==0);wait_kind(h,1);
+ assert(mqtt_client_connect(h,5,4,0,0,NULL,0,NULL,0,NULL,0,0,NULL,0,NULL,0,0,0,NULL,0,NULL,0)==0);wait_kind(h,1);
  assert(mqtt_client_close(h)==0);assert(mqtt_client_free(h)==0);assert(mqtt_client_free(h)==0);
  assert(mqtt_client_publish(h,6,(const uint8_t*)"x",1,NULL,0,0,0)==3);
  assert(mqtt_runtime_shutdown()==0);

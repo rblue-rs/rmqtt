@@ -1,0 +1,67 @@
+// Packages a prebuilt Rust cdylib (libmqtt_c.so) for Android.
+// The library is produced by examples/flutter/tools/build-libs.sh
+// with panic=abort. This Gradle file does not compile Rust itself
+// when the artifact is already present; the hook below can invoke
+// the script during a Flutter Android build.
+//
+// Default ABI for this skeleton: arm64-v8a only.
+
+group = "rs.rmqtt.mqtt_flutter"
+version = "0.1.0"
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath("com.android.tools.build:gradle:9.3.1")
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.android.library"
+
+android {
+    namespace = "rs.rmqtt.mqtt_flutter"
+    compileSdk = 36
+    ndkVersion = android.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    defaultConfig {
+        minSdk = 24
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ["src/main/jniLibs"]
+        }
+    }
+}
+
+def rustScript = file("../../../tools/build-libs.sh")
+def rustLib = file("src/main/jniLibs/arm64-v8a/libmqtt_c.so")
+
+tasks.register("buildMqttRustAndroidArm64", Exec) {
+    onlyIf { rustScript.exists() && !rustLib.exists() }
+    workingDir = rustScript.parentFile
+    commandLine "bash", rustScript.absolutePath, "android-arm64"
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn("buildMqttRustAndroidArm64")
+}

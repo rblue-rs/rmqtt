@@ -59,10 +59,42 @@ int32_t mqtt_client_new(const uint8_t *host,
                         uint16_t port,
                         uint64_t *out);
 
+/**
+ * # Safety
+ * `ca_pem` must reference `ca_pem_len` readable bytes when non-null.
+ * A null pointer is allowed only when `ca_pem_len` is zero, which means no
+ * custom CA: if `use_tls` is 1, the host system roots are used. `use_tls`
+ * must be 0 or 1. Providing a CA without TLS is rejected.
+ * Username and password pointers are copied immediately; null + zero length
+ * means the field is absent. `allow_plaintext_credentials` and `will_retain`
+ * must be 0 or 1. A will is absent when `will_topic` is null and
+ * `will_topic_len` is zero.
+ * `client_cert_pem` and `client_key_pem` are copied immediately; null + zero
+ * length means the field is absent. Both must be provided together and only
+ * when `use_tls` is 1. They are not written to disk.
+ */
 int32_t mqtt_client_connect(uint64_t handle,
                             uint64_t op,
                             uint8_t protocol,
-                            uint16_t keep_alive_seconds);
+                            uint16_t keep_alive_seconds,
+                            uint8_t use_tls,
+                            const uint8_t *ca_pem,
+                            size_t ca_pem_len,
+                            const uint8_t *username,
+                            size_t username_len,
+                            const uint8_t *password,
+                            size_t password_len,
+                            uint8_t allow_plaintext_credentials,
+                            const uint8_t *will_topic,
+                            size_t will_topic_len,
+                            const uint8_t *will_payload,
+                            size_t will_payload_len,
+                            uint8_t will_qos,
+                            uint8_t will_retain,
+                            const uint8_t *client_cert_pem,
+                            size_t client_cert_pem_len,
+                            const uint8_t *client_key_pem,
+                            size_t client_key_pem_len);
 
 /**
  * # Safety

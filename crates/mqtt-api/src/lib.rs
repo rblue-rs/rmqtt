@@ -1,4 +1,29 @@
 use std::time::Duration;
+
+pub const MAX_CA_PEM: usize = 65536;
+pub const MAX_CLIENT_CERT_PEM: usize = 65536;
+pub const MAX_CLIENT_KEY_PEM: usize = 65536;
+pub const MAX_WILL_PAYLOAD: usize = 65536;
+
+/// MQTT 3.1.1 Last Will. QoS 2 is rejected as unsupported.
+#[derive(Clone)]
+pub struct Will {
+    pub topic: String,
+    pub payload: Vec<u8>,
+    pub qos: u8,
+    pub retain: bool,
+}
+impl std::fmt::Debug for Will {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Will")
+            .field("topic", &self.topic)
+            .field("payload_len", &self.payload.len())
+            .field("qos", &self.qos)
+            .field("retain", &self.retain)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum Error {
@@ -15,6 +40,18 @@ pub enum Error {
     Internal = 11,
     Overflow = 12,
     Timeout = 13,
+    Tls = 14,
+    CertificateUntrusted = 15,
+    HostnameMismatch = 16,
+    CertificateExpired = 17,
+    /// Password on plaintext TCP without an explicit allow switch.
+    PlaintextCredentials = 18,
+    /// CONNACK rejected the username/password (or not authorized).
+    BadCredentials = 19,
+    /// Client certificate or private key PEM could not be parsed.
+    InvalidClientCertificate = 20,
+    /// Client certificate and private key are not a usable pair.
+    CertificateKeyMismatch = 21,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -22,13 +59,72 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
-#[derive(Debug, Clone)]
+
+fn zeroize(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        *b = 0;
+    }
+}
+
+fn take_zeroized_bytes(value: &mut Option<Vec<u8>>) {
+    if let Some(mut bytes) = value.take() {
+        zeroize(&mut bytes);
+    }
+}
+
+#[derive(Clone)]
 pub struct Options {
     pub server: String,
     pub client_id: String,
     pub port: u16,
     pub protocol: u8,
     pub keep_alive: Duration,
+    /// When true, MQTT is carried over TLS with certificate and hostname checks.
+    pub use_tls: bool,
+    /// PEM-encoded CA certificates. `None` with `use_tls` trusts host system
+    /// roots only. `Some` trusts only the provided CAs and does not mix in
+    /// system roots. Empty or invalid PEM is rejected; it is not a fallback.
+    pub ca_pem: Option<Vec<u8>>,
+    /// PEM-encoded client certificate chain. Must be paired with
+    /// `client_key_pem` and `use_tls`.
+    pub client_cert_pem: Option<Vec<u8>>,
+    /// PEM-encoded client private key. Must be paired with `client_cert_pem`
+    /// and `use_tls`. Held only in memory.
+    pub client_key_pem: Option<Vec<u8>>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    /// When true, a password may be sent on plaintext TCP. Default false.
+    /// TLS connections may send a password without this switch.
+    pub allow_plaintext_credentials: bool,
+    pub will: Option<Will>,
+}
+impl std::fmt::Debug for Options {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Options")
+            .field("server", &self.server)
+            .field("client_id", &self.client_id)
+            .field("port", &self.port)
+            .field("protocol", &self.protocol)
+            .field("keep_alive", &self.keep_alive)
+            .field("use_tls", &self.use_tls)
+            .field("ca_pem", &self.ca_pem.as_ref().map(|_| "<redacted>"))
+            .field(
+                "client_cert_pem",
+                &self.client_cert_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "client_key_pem",
+                &self.client_key_pem.as_ref().map(|_| "<redacted>"),
+            )
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field(
+                "allow_plaintext_credentials",
+                &self.allow_plaintext_credentials,
+            )
+            .field("will", &self.will)
+            .finish()
+    }
 }
 impl Options {
     pub fn new(server: impl Into<String>, client_id: impl Into<String>, port: u16) -> Self {
@@ -38,6 +134,24 @@ impl Options {
             port,
             protocol: 4,
             keep_alive: Duration::ZERO,
+            use_tls: false,
+            ca_pem: None,
+            client_cert_pem: None,
+            client_key_pem: None,
+            username: None,
+            password: None,
+            allow_plaintext_credentials: false,
+            will: None,
+        }
+    }
+    /// Best-effort clearing of secret material. This is not a secure-erase guarantee.
+    pub fn clear_secrets(&mut self) {
+        take_zeroized_bytes(&mut self.ca_pem);
+        take_zeroized_bytes(&mut self.client_cert_pem);
+        take_zeroized_bytes(&mut self.client_key_pem);
+        if let Some(password) = self.password.take() {
+            let mut bytes = password.into_bytes();
+            zeroize(&mut bytes);
         }
     }
     pub fn validate(&self) -> Result<(), Error> {
@@ -52,9 +166,70 @@ impl Options {
         {
             return Err(Error::InvalidArgument);
         }
+        if self.use_tls {
+            if let Some(pem) = &self.ca_pem {
+                if pem.is_empty() || pem.len() > MAX_CA_PEM || pem.contains(&0) {
+                    return Err(Error::InvalidArgument);
+                }
+            }
+        } else if self.ca_pem.is_some() {
+            return Err(Error::InvalidArgument);
+        }
+        if self.client_cert_pem.is_some() || self.client_key_pem.is_some() {
+            if !self.use_tls {
+                return Err(Error::InvalidArgument);
+            }
+            match (&self.client_cert_pem, &self.client_key_pem) {
+                (Some(cert), Some(key)) => {
+                    if cert.is_empty()
+                        || cert.len() > MAX_CLIENT_CERT_PEM
+                        || cert.contains(&0)
+                        || key.is_empty()
+                        || key.len() > MAX_CLIENT_KEY_PEM
+                        || key.contains(&0)
+                    {
+                        return Err(Error::InvalidArgument);
+                    }
+                }
+                _ => return Err(Error::CertificateKeyMismatch),
+            }
+        }
+        if let Some(username) = &self.username {
+            if username.is_empty() || username.len() > 65535 || username.contains('\0') {
+                return Err(Error::InvalidArgument);
+            }
+        }
+        if let Some(password) = &self.password {
+            if self.username.is_none() || password.len() > 65535 || password.contains('\0') {
+                return Err(Error::InvalidArgument);
+            }
+            if !self.use_tls && !self.allow_plaintext_credentials {
+                return Err(Error::PlaintextCredentials);
+            }
+        }
+        if let Some(will) = &self.will {
+            if will.topic.is_empty()
+                || will.topic.len() > 65535
+                || will.topic.contains('\0')
+                || will.topic.contains(['#', '+'])
+                || will.payload.len() > MAX_WILL_PAYLOAD
+            {
+                return Err(Error::InvalidArgument);
+            }
+            match will.qos {
+                0 | 1 => {}
+                2 => return Err(Error::Unsupported),
+                _ => return Err(Error::InvalidArgument),
+            }
+        }
         if self.protocol != 4 {
             return Err(Error::Unsupported);
         }
         Ok(())
+    }
+}
+impl Drop for Options {
+    fn drop(&mut self) {
+        self.clear_secrets();
     }
 }

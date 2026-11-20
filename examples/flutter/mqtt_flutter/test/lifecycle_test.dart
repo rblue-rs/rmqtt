@@ -205,9 +205,9 @@ void main() {
     final sub = c.publishUpdates.listen(updates.add);
     try {
       await c.connect();
-      final a = c.publishMessage('lifecycle/all', Uint8List(1),
-          qos: MqttQos.atLeastOnce);
-      final b = c.publishMessage('lifecycle/all', Uint8List(1));
+      final a =
+          c.publishMessage('test/all', Uint8List(1), qos: MqttQos.atLeastOnce);
+      final b = c.publishMessage('test/all', Uint8List(1));
       expect(b.whenAcknowledged, isNull);
       final failures = [
         a.whenQueued,

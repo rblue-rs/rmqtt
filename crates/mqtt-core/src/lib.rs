@@ -1,4 +1,5 @@
 //! Bounded, no-auto-reconnect MQTT 3.1.1 actor. Experimental host slice.
+mod tls;
 use mqtt_api::{Error, Options};
 use rumqttc::{AsyncClient, Event as EngineEvent, MqttOptions, Outgoing, Packet, QoS};
 use std::{
@@ -177,10 +178,33 @@ impl Client {
         if let Some(task) = self.task.take() {
             task.abort();
         }
-        let mut opts = MqttOptions::new(options.client_id, options.server, options.port);
+        let transport = if options.use_tls {
+            Some(tls::transport(&options)?)
+        } else {
+            None
+        };
+        let mut opts = MqttOptions::new(
+            options.client_id.clone(),
+            options.server.clone(),
+            options.port,
+        );
         opts.set_keep_alive(options.keep_alive)
             .set_manual_acks(true)
             .set_max_packet_size(MAX_WIRE_PACKET, MAX_WIRE_PACKET);
+        if let Some(transport) = transport {
+            opts.set_transport(transport);
+        }
+        if let Some(username) = &options.username {
+            opts.set_credentials(username, options.password.as_deref().unwrap_or(""));
+        }
+        if let Some(will) = options.will.clone() {
+            opts.set_last_will(rumqttc::LastWill::new(
+                will.topic,
+                will.payload,
+                qos_value(will.qos)?,
+                will.retain,
+            ));
+        }
         let (client, mut engine) = AsyncClient::new(opts, 4);
         engine.network_options.set_connection_timeout(5);
         let (tx, rx) = mpsc::channel(32);
@@ -377,7 +401,7 @@ async fn run(
                 packet_id = 0;
             },
             event = engine.poll() => {
-                let event = event.map_err(|e| (if matches!(e, rumqttc::ConnectionError::ConnectionRefused(_)) {Error::Refused} else {Error::Network}, connect_op))?;
+                let event = event.map_err(|e| (tls::map_connect_error(e), connect_op))?;
                 if process_event(event, &mut active, &mut packet_id, queue, state, connect_op, &client)? {
                     return Ok(());
                 }

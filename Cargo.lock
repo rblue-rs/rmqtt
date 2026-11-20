@@ -402,6 +402,9 @@ dependencies = [
  "mqtt-api",
  "mqtt-runtime",
  "rumqttc",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pemfile",
  "tokio",
 ]
 

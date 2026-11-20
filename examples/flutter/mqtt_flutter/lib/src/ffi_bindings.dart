@@ -75,26 +75,117 @@ class MqttBindings {
       int Function(ffi.Pointer<ffi.Uint8>, int, ffi.Pointer<ffi.Uint8>, int,
           int, ffi.Pointer<ffi.Uint64>)>();
 
+  /// # Safety
+  /// `ca_pem` must reference `ca_pem_len` readable bytes when non-null.
+  /// A null pointer is allowed only when `ca_pem_len` is zero, which means no
+  /// custom CA: if `use_tls` is 1, the host system roots are used. `use_tls`
+  /// must be 0 or 1. Providing a CA without TLS is rejected.
+  /// Username and password pointers are copied immediately; null + zero length
+  /// means the field is absent. `allow_plaintext_credentials` and `will_retain`
+  /// must be 0 or 1. A will is absent when `will_topic` is null and
+  /// `will_topic_len` is zero.
+  /// `client_cert_pem` and `client_key_pem` are copied immediately; null + zero
+  /// length means the field is absent. Both must be provided together and only
+  /// when `use_tls` is 1. They are not written to disk.
   int mqtt_client_connect(
     int handle,
     int op,
     int protocol,
     int keep_alive_seconds,
+    int use_tls,
+    ffi.Pointer<ffi.Uint8> ca_pem,
+    int ca_pem_len,
+    ffi.Pointer<ffi.Uint8> username,
+    int username_len,
+    ffi.Pointer<ffi.Uint8> password,
+    int password_len,
+    int allow_plaintext_credentials,
+    ffi.Pointer<ffi.Uint8> will_topic,
+    int will_topic_len,
+    ffi.Pointer<ffi.Uint8> will_payload,
+    int will_payload_len,
+    int will_qos,
+    int will_retain,
+    ffi.Pointer<ffi.Uint8> client_cert_pem,
+    int client_cert_pem_len,
+    ffi.Pointer<ffi.Uint8> client_key_pem,
+    int client_key_pem_len,
   ) {
     return _mqtt_client_connect(
       handle,
       op,
       protocol,
       keep_alive_seconds,
+      use_tls,
+      ca_pem,
+      ca_pem_len,
+      username,
+      username_len,
+      password,
+      password_len,
+      allow_plaintext_credentials,
+      will_topic,
+      will_topic_len,
+      will_payload,
+      will_payload_len,
+      will_qos,
+      will_retain,
+      client_cert_pem,
+      client_cert_pem_len,
+      client_key_pem,
+      client_key_pem_len,
     );
   }
 
   late final _mqtt_client_connectPtr = _lookup<
       ffi.NativeFunction<
-          ffi.Int32 Function(ffi.Uint64, ffi.Uint64, ffi.Uint8,
-              ffi.Uint16)>>('mqtt_client_connect');
-  late final _mqtt_client_connect =
-      _mqtt_client_connectPtr.asFunction<int Function(int, int, int, int)>();
+          ffi.Int32 Function(
+              ffi.Uint64,
+              ffi.Uint64,
+              ffi.Uint8,
+              ffi.Uint16,
+              ffi.Uint8,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Uint8,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Uint8,
+              ffi.Uint8,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size)>>('mqtt_client_connect');
+  late final _mqtt_client_connect = _mqtt_client_connectPtr.asFunction<
+      int Function(
+          int,
+          int,
+          int,
+          int,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          int,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int)>();
 
   /// # Safety
   /// topic must reference topic_len readable bytes.

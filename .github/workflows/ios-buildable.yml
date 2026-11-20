@@ -1,0 +1,57 @@
+# iOS arm64 "buildable" job, separate from host-tests.yml.
+# Requires macOS and Xcode. A Linux host cannot run these steps.
+# A successful run is an unsigned iOS build / static library, not a
+# simulator result, not a physical-device TLS smoke test, and not a
+# promise of always-on background MQTT. No repository secrets are used.
+# Do not treat this workflow as already green until it has actually run
+# on GitHub.
+name: iOS buildable
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ios-arm64:
+    name: iOS arm64 buildable
+    runs-on: macos-15
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust 1.100.0
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: "1.100.0"
+          targets: aarch64-apple-ios
+
+      - name: Install Flutter 3.50.1
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: "3.50.1"
+          channel: stable
+          cache: true
+
+      - name: Record tool versions
+        run: |
+          rustc --version
+          cargo --version
+          flutter --version
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Fetch Dart/Flutter packages
+        run: |
+          flutter pub get --directory examples/flutter/mqtt_flutter
+          flutter pub get --directory examples/flutter/mqtt_flutter/example
+
+      - name: Build iOS arm64 static library
+        run: examples/flutter/tools/build-libs.sh ios-arm64
+
+      - name: Build unsigned iOS example
+        working-directory: examples/flutter/mqtt_flutter/example
+        run: flutter build ios --debug --no-codesign --no-pub

@@ -100,9 +100,7 @@ still count, then races poll, release and both fallback callbacks. The controlle
 pause test retains SUBACK and Queued/Sent/PUBACK, then124 messages, then Overflow:
 128 normal slots total. Another test still preserves all128 message-only events.
 
-See [testing](testing.md) for recorded totals and Linux RSS observations. Local once-only
-settlement is not MQTT exactly-once delivery. No TLS, auto reconnect, persistence
-or mobile validation is implied.
+See [testing](testing.md) for recorded totals and Linux RSS observations. Local once-only settlement is not MQTT exactly-once delivery. Host TLS/mTLS is documented separately; no auto reconnect, persistence, or physical-device validation is implied.
 
 ## Official basis
 

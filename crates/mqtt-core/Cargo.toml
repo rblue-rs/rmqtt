@@ -8,3 +8,10 @@ tokio.workspace = true
 rumqttc.workspace = true
 mqtt-api.workspace = true
 mqtt-runtime.workspace = true
+rustls = "0.23.46"
+rustls-native-certs = "0.8.5"
+rustls-pemfile = "2.2.0"
+
+[dev-dependencies]
+rustls = "0.23.46"
+rustls-pemfile = "2.2.0"

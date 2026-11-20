@@ -1,5 +1,5 @@
-// Run in its own OS process to verify cleanup after owner isolate exit.
-// A nonzero result reports a cleanup regression.
+// Run in its own OS process: intentionally leaks the prototype's native handle.
+// Desired behavior is cleanup after owner isolate exit; exit 1 records the gap.
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
@@ -19,6 +19,6 @@ Future<void> main() async {
       DynamicLibrary.open(Platform.environment['MQTT_NATIVE_LIBRARY']!));
   final code = native.mqtt_runtime_shutdown();
   stdout.writeln(
-      'Owner-isolate cleanup: shutdown after owner isolate exit: expected 0, actual $code');
+      'shutdown after owner isolate exit: expected 0, actual $code');
   exitCode = code == 0 ? 0 : 1;
 }

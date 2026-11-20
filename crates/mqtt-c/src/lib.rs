@@ -117,18 +117,118 @@ pub unsafe extern "C" fn mqtt_client_new(
         Ok(())
     })
 }
+unsafe fn optional_text(p: *const u8, len: usize) -> Result<Option<String>, Error> {
+    if p.is_null() && len == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(unsafe { text(p, len)? }))
+    }
+}
+
+/// # Safety
+/// `ca_pem` must reference `ca_pem_len` readable bytes when non-null.
+/// A null pointer is allowed only when `ca_pem_len` is zero, which means no
+/// custom CA: if `use_tls` is 1, the host system roots are used. `use_tls`
+/// must be 0 or 1. Providing a CA without TLS is rejected.
+/// Username and password pointers are copied immediately; null + zero length
+/// means the field is absent. `allow_plaintext_credentials` and `will_retain`
+/// must be 0 or 1. A will is absent when `will_topic` is null and
+/// `will_topic_len` is zero.
+/// `client_cert_pem` and `client_key_pem` are copied immediately; null + zero
+/// length means the field is absent. Both must be provided together and only
+/// when `use_tls` is 1. They are not written to disk.
 #[no_mangle]
-pub extern "C" fn mqtt_client_connect(
+pub unsafe extern "C" fn mqtt_client_connect(
     handle: u64,
     op: u64,
     protocol: u8,
     keep_alive_seconds: u16,
+    use_tls: u8,
+    ca_pem: *const u8,
+    ca_pem_len: usize,
+    username: *const u8,
+    username_len: usize,
+    password: *const u8,
+    password_len: usize,
+    allow_plaintext_credentials: u8,
+    will_topic: *const u8,
+    will_topic_len: usize,
+    will_payload: *const u8,
+    will_payload_len: usize,
+    will_qos: u8,
+    will_retain: u8,
+    client_cert_pem: *const u8,
+    client_cert_pem_len: usize,
+    client_key_pem: *const u8,
+    client_key_pem_len: usize,
 ) -> i32 {
     boundary(|| {
+        if use_tls > 1 || allow_plaintext_credentials > 1 || will_retain > 1 {
+            return Err(Error::InvalidArgument);
+        }
+        let ca = if ca_pem.is_null() && ca_pem_len == 0 {
+            None
+        } else {
+            Some(unsafe { bytes(ca_pem, ca_pem_len, mqtt_api::MAX_CA_PEM)? }.to_vec())
+        };
+        let client_cert = if client_cert_pem.is_null() && client_cert_pem_len == 0 {
+            None
+        } else {
+            Some(
+                unsafe {
+                    bytes(
+                        client_cert_pem,
+                        client_cert_pem_len,
+                        mqtt_api::MAX_CLIENT_CERT_PEM,
+                    )?
+                }
+                .to_vec(),
+            )
+        };
+        let client_key = if client_key_pem.is_null() && client_key_pem_len == 0 {
+            None
+        } else {
+            Some(
+                unsafe {
+                    bytes(
+                        client_key_pem,
+                        client_key_pem_len,
+                        mqtt_api::MAX_CLIENT_KEY_PEM,
+                    )?
+                }
+                .to_vec(),
+            )
+        };
+        let username = unsafe { optional_text(username, username_len)? };
+        let password = unsafe { optional_text(password, password_len)? };
+        let will = if will_topic.is_null() && will_topic_len == 0 {
+            if will_payload_len != 0 {
+                return Err(Error::InvalidArgument);
+            }
+            None
+        } else {
+            Some(mqtt_api::Will {
+                topic: unsafe { text(will_topic, will_topic_len)? },
+                payload: unsafe {
+                    bytes(will_payload, will_payload_len, mqtt_api::MAX_WILL_PAYLOAD)?
+                }
+                .to_vec(),
+                qos: will_qos,
+                retain: will_retain == 1,
+            })
+        };
         entry(handle, |e| {
             let mut opts = e.options.clone();
             opts.protocol = protocol;
             opts.keep_alive = Duration::from_secs(keep_alive_seconds as u64);
+            opts.use_tls = use_tls == 1;
+            opts.ca_pem = ca.clone();
+            opts.client_cert_pem = client_cert.clone();
+            opts.client_key_pem = client_key.clone();
+            opts.username = username.clone();
+            opts.password = password.clone();
+            opts.allow_plaintext_credentials = allow_plaintext_credentials == 1;
+            opts.will = will.clone();
             e.client.connect(op, opts)
         })
     })
@@ -254,6 +354,7 @@ pub extern "C" fn mqtt_client_close(handle: u64) -> i32 {
         let mut s = CLIENTS.lock().map_err(|_| Error::Internal)?;
         let e = s.1.get_mut(&handle).ok_or(Error::Closed)?;
         e.closed = true;
+        e.options.clear_secrets();
         e.client.close()
     })
 }

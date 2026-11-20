@@ -5,6 +5,7 @@ cd "$ROOT"
 CARGO="${CARGO:-cargo}"
 DART="${DART:-dart}"
 PYTHON="${MQTT_TEST_PYTHON:-python3}"
+export MQTT_TEST_PYTHON="$PYTHON"
 "$CARGO" fmt --all -- --check
 "$CARGO" clippy --workspace --all-targets -- -D warnings
 "$CARGO" test --workspace --locked

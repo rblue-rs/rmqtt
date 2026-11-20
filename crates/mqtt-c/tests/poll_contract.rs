@@ -61,7 +61,33 @@ fn empty_invalid_inputs_and_concurrent_handle_release() {
             1
         );
         assert_eq!(mqtt_client_subscribe(h, 1, [0xff].as_ptr(), 1, 1), 1);
-        assert_eq!(mqtt_client_connect(h, 1, 5, 0), 6);
+        assert_eq!(
+            mqtt_client_connect(
+                h,
+                1,
+                5,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0
+            ),
+            6
+        );
         assert_eq!(mqtt_client_free(h), 4);
         let workers: Vec<_> = (0..8)
             .map(|_| {
@@ -75,7 +101,33 @@ fn empty_invalid_inputs_and_concurrent_handle_release() {
         for worker in workers {
             worker.join().unwrap();
         }
-        assert_eq!(mqtt_client_connect(h, 2, 4, 0), 3);
+        assert_eq!(
+            mqtt_client_connect(
+                h,
+                2,
+                4,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0
+            ),
+            3
+        );
         assert_eq!(mqtt_client_free(h), 0);
         assert_eq!(mqtt_runtime_shutdown(), 0);
     }

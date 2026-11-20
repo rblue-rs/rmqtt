@@ -4,3 +4,15 @@
 build/
 *.so
 *.dylib
+
+# Flutter / Android / iOS local config and packaging output
+**/local.properties
+**/.cxx/
+**/.gradle/
+**/.idea/
+*.iml
+*.a
+*.xcframework/
+xcuserdata/
+**/Pods/
+**/.symlinks/
