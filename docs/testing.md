@@ -64,17 +64,19 @@ backpressure coverage remains. Local once-only settlement is not MQTT
 exactly-once delivery. C sanitizer flags instrument the C executable, not the
 full Rust dependency tree.
 
-## Continuous integration — not yet observed on GitHub
+## Continuous integration
 
 `.github/workflows/host-tests.yml` is the Linux host job on `ubuntu-24.04`. It
 installs the pinned tools above, with no repository secrets, then runs the same
-steps as `scripts/ci-host.sh`. A local pass is not a GitHub Actions result. No
-workflow badge is published until the job has actually run green on GitHub.
-There is no macOS host-tests job: the C smoke test and Dart native library path
-in `scripts/test-host.sh` are Linux `.so` / rpath specific.
+steps as `scripts/ci-host.sh`. The README Host tests badge tracks this workflow
+on `main` only; it is not a claim that every workflow, an iOS build, an
+emulator, a simulator, or a physical device has passed. A local pass is not a
+GitHub Actions result. There is no macOS host-tests job: the C smoke test and
+Dart native library path in `scripts/test-host.sh` are Linux `.so` / rpath
+specific.
 
 A separate `.github/workflows/ios-buildable.yml` job is documented in
-[device-smoke.md](device-smoke.md) and is also pending a real macOS/CI run.
+[device-smoke.md](device-smoke.md). It is not covered by the Host tests badge.
 
 ## Not verified
 

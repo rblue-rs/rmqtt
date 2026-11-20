@@ -90,6 +90,8 @@ The C smoke test uses ASan/UBSan on the C executable, not on Rust dependencies.
 
 ## Continuous integration
 
+[![Host tests](https://github.com/rblue-rs/rmqtt/actions/workflows/host-tests.yml/badge.svg?branch=main)](https://github.com/rblue-rs/rmqtt/actions/workflows/host-tests.yml?query=branch%3Amain)
+
 `.github/workflows/host-tests.yml` runs the Linux host gate on `ubuntu-24.04`.
 It installs pinned tools (Rust 1.100.0 from `rust-toolchain.toml`, Dart 3.14.0,
 Python 3.13, `amqtt==0.12.2`, plus a C compiler and libclang), runs
@@ -105,10 +107,10 @@ The same steps can be run locally with the same pinned versions:
 MQTT_TEST_PYTHON=/path/to/venv/bin/python scripts/ci-host.sh
 ```
 
-This documents the workflow only. A status badge, and any claim that GitHub
-Actions has passed, wait until the workflow has actually run green on GitHub
-after an authorized push. A local `scripts/ci-host.sh` result is not a remote
-CI result.
+The Host tests badge reports that Linux workflow on `main` only. It is not a
+claim that every workflow, an iOS build, an emulator, a simulator, or a
+physical device has passed. A local `scripts/ci-host.sh` result is not a
+remote CI result.
 
 ## Mobile packaging and buildable evidence
 
@@ -128,7 +130,7 @@ A Linux host can produce Android buildable evidence when Flutter 3.50.x and
 Android NDK 28.2.13676358 are installed (`flutter build apk --debug --target-platform android-arm64`). iOS
 library and unsigned `flutter build ios --no-codesign` builds require macOS
 and Xcode; `.github/workflows/ios-buildable.yml` is a separate workflow from
-the Linux host-tests job and is pending a real CI or Mac run. An APK, a
+the Linux host-tests job and is not covered by the Host tests badge. An APK, a
 static library, or an unsigned iOS build is not an emulator, simulator, or
 physical-device TLS result.
 
