@@ -10,7 +10,8 @@ Reference: https://api.dart.dev/dart-ffi/NativeCallable/NativeCallable.listener.
 
 - `mqtt_client_poll` copies metadata/topic/payload into caller-owned buffers.
   Metadata contains scalars and lengths, not borrowed Rust references.
-- Native copies accepted inputs before return and retains no output pointers.
+- Native copies accepted inputs before return. Poll itself retains no output pointers;
+  a separate ownership registration retains caller-buffer addresses only for cleanup.
 - Empty preserves all output bytes. BufferTooSmall updates required metadata,
   preserves the event for retry, and leaves topic/payload buffers untouched.
 - Handles are nonzero monotonically increasing numeric keys behind a mutex, not
@@ -21,9 +22,16 @@ Reference: https://api.dart.dev/dart-ffi/NativeCallable/NativeCallable.listener.
   There is no drain API or callback handshake.
 - One isolate owns each wrapper, timer, buffers and poll consumer. Independent
   clients may live in separate isolates; do not share raw wrapper/buffer pointers.
-- Explicit close is mandatory. Owner-isolate exit without close currently leaks a
-  native handle/runtime lease. A child-process regression remains failing. There
-  is no Finalizer, hot-restart or forced-isolate-death cleanup guarantee.
+- Explicit close is preferred. Weak Timer callbacks do not root an unreachable client.
+  NativeFinalizer is GC/group-shutdown fallback; a native port receives only a scalar
+  owner-exit id. Cleanup removes each token once, then close/free/matching nativeFree
+  outside the registry lock. It never re-enters Dart or blocks runtime destruction
+  on a worker. Retiring resources still consume quota until actual deallocation.
+- Completed connection/registration exit paths have Linux tests. Partial setup kill,
+  process/VM crash, hot restart, forced library unload and mobile are not guaranteed.
+  Native notification waiting is bounded separately from explicit runtime shutdown.
+  Tokio background shutdown may leave blocking/DNS work running until it returns.
+  See [ownership](ownership.md) for the exact boundary and memory accounting.
 
 ## Bounds and concurrency
 

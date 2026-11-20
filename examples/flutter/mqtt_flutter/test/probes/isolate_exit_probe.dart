@@ -1,5 +1,5 @@
-// Run in its own OS process: intentionally leaks the prototype's native handle.
-// Desired behavior is cleanup after owner isolate exit; exit 1 records the gap.
+// Run in its own OS process to verify cleanup after owner isolate exit.
+// A nonzero result reports a cleanup regression.
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';

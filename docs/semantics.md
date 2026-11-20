@@ -90,7 +90,7 @@ QoS0 `whenAcknowledged == null`，不伪造 ACK。成功的 Queued/Sent 不会�
 
 ### 错误映射与取消接口
 
-实验 ABI 状态码仍是上文 0–13，没有新增状态或结构。native 非零业务错误 →
+实验 ABI 状态码仍是上文 0–13，既有 event/option layout 不变。新增 ownership helper 见 ownership.md。native 非零业务错误 →
 `MqttException(code)`；Dart 自有 deadline 仍为 `TimeoutException`（不冒用 native 预留13）；
 已关闭/不当状态/本地断开结算仍保留既有 `StateError`；本地取消用其子类
 `MqttOperationCancelled(operationId)`，不增加 native Cancelled code。统一改成全套
@@ -136,4 +136,16 @@ try {
 不提供统一错误类型或 C cancel/reset 导出；ABI 尚未冻结。
 C 调用者仍自行提供 op_id，在自己的等待层放弃等待。
 
-owner isolate 未 close 就退出的 lease 回收尚未实现；未提供 Finalizer，默认测试仍因此失败。
+## 所有权与退出
+
+显式 close 优先。NativeFinalizer 作 GC/isolate-group 退出托底；单个 owner 的退出通知
+只向 native port 发送整数，native 自行回收 client、匹配 allocator 的缓冲与 runtime ref，
+不调用 Dart cleanup、不等待 Dart 握手，不改变 caller-owned polling 数据路径。
+
+已完成初始化/连接后的受控 Isolate.run、自然静默退出及两种 VM kill 优先级在 Linux
+通过。注册/连接分配中途强杀、进程退出/VM crash、热重启/移动端不保证；活跃 Timer
+可以使 isolate 继续存活。GC 不保证及时性。native shutdown 对退出通知竞争最多等待2秒，
+再应用既有 shutdown/live-lease guard；这不是整个 shutdown API 的总耗时上限。
+Tokio blocking/DNS 工作可能晚于 background shutdown 返回，不承诺即时线程/RSS回收。
+
+caller buffers、retiring quota、背压/Overflow 表和完整支持矩阵见 [ownership](ownership.md)。

@@ -2,6 +2,7 @@
 #include "mqtt_client.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 static void nap(void) {struct timespec ts={0,2000000};nanosleep(&ts,NULL);}
@@ -9,6 +10,26 @@ static MqttEvent wait_kind(uint64_t h,uint32_t kind) {
  MqttEvent e={0}; uint8_t topic[65535],payload[65536];
  for(int i=0;i<2500;i++) {int code=mqtt_client_poll(h,&e,topic,sizeof(topic),payload,sizeof(payload));if(code==10){nap();continue;}assert(code==0);assert(e.kind!=8);if(e.kind==kind)return e;}
  assert(!"Timed out waiting for event");return e;
+}
+static int owned_frees=0;
+static void owned_free(void* p){owned_frees++;free(p);}
+static void ownership_smoke(void){
+ for(int i=0;i<2;i++){
+  size_t owner=0,token=0;uint64_t h=0;
+  assert(mqtt_dart_owner_new(&owner)==0);
+  assert(mqtt_client_new((const uint8_t*)"localhost",9,(const uint8_t*)"owned",5,1883,&h)==0);
+  MqttEvent* event=calloc(1,sizeof(*event));uint8_t* topic=calloc(65535,1);uint8_t* payload=calloc(65536,1);
+  assert(event&&topic&&payload);
+  assert(mqtt_dart_client_register(owner,h,event,topic,payload,owned_free,&token)==0);
+  assert(mqtt_dart_owner_shutdown(owner)==4);
+  if(i==0)mqtt_dart_owner_finalize((void*)(uintptr_t)owner);
+  else mqtt_dart_client_finalize((void*)(uintptr_t)token);
+  assert(mqtt_dart_client_release(token)==0);
+  assert(mqtt_dart_owner_shutdown(owner)==0);
+  mqtt_dart_owner_finalize((void*)(uintptr_t)owner);
+  MqttEvent out={0};assert(mqtt_client_poll(h,&out,NULL,0,NULL,0)==3);
+ }
+ assert(owned_frees==6);assert(mqtt_runtime_shutdown()==0);
 }
 int main(void) {
  const char *port=getenv("MQTT_TEST_PORT");assert(port);uint64_t h=0;
@@ -56,5 +77,6 @@ int main(void) {
  assert(mqtt_client_close(h)==0);assert(mqtt_client_free(h)==0);assert(mqtt_client_free(h)==0);
  assert(mqtt_client_publish(h,6,(const uint8_t*)"x",1,NULL,0,0,0)==3);
  assert(mqtt_runtime_shutdown()==0);
- puts("C ABI PASS: lifecycle, CONNACK/SUBACK, input copies, QoS1 stages, binary buffers/retry, reconnect");
+ ownership_smoke();
+ puts("C ABI PASS: owned-buffer once-only cleanup, lifecycle, CONNACK/SUBACK, input copies, QoS1 stages, binary buffers/retry, reconnect");
 }

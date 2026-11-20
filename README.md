@@ -16,20 +16,17 @@ is not that package and must not be published to crates.io under that occupied n
   caller-owned buffers and buffer-size retry, final runtime shutdown refusing live clients.
 - Bounded native commands/events; overflow terminates, never silently evicts control
   events. Pausing any Dart stream listener stops polling and applies backpressure.
-- Dart `MqttOperation<T>` with immediate operationId/future/cancel and additive
-  beginConnect / beginSubscribe / beginUnsubscribe / beginDisconnect; existing
-  Future methods still work. Cancellation only abandons local waiting, not MQTT packets.
-- Independent local waits for coalesced disconnect callers, a shared first deadline,
-  bounded join bookkeeping, and late-ACK isolation after timeout/cancellation.
-- Close seals the native handle permanently: later poll returns Closed, never old
-  messages or Empty. This is force close, not graceful draining.
+- Additive `MqttOperation<T>` / beginX APIs expose immediate operationId/future/cancel;
+  existing Future methods delegate. Cancel abandons only local waiting, not MQTT packets.
+- Weak adaptive polling, bounded stream backpressure, matching-allocator native buffer
+  cleanup, and native-only scalar owner-exit notifications. NativeFinalizer is GC fallback.
 - Default `keepAlivePeriod = Duration.zero` is actually encoded as zero in CONNECT.
 
 ## Explicitly not implemented / not validated
 
 **No TLS/mTLS, MQTT 5 engine, WS/WSS, reconnect policy, persistent sessions,
 subscription reconciliation, will/credentials, graceful draining close,
-NativeFinalizer, mobile plugin packaging or mobile tests yet.** MQTT 5 returns
+mobile plugin packaging or mobile tests yet.** MQTT 5 returns
 `MqttException(6)` / Rust `Error::Unsupported`, including its default-zero case;
 it never rewrites 0 to 5 or 60 and never invokes the panicking v5 setter.
 Unsupported features are absent from this experimental Dart options object;
@@ -40,16 +37,22 @@ C ABI is **experimental, not yet frozen**. In particular see
 callback buffer + `NativeCallable.listener` combination is unsafe. The prototype
 uses polling instead of silently implementing that use-after-free design.
 
-## Current verification status
+## Verified Linux host result
 
-**The host gate is not green.** The latest Linux run has 22/22 Rust tests passing
-and 38 Dart tests passing, with one known failure: exiting the owner isolate
-without explicit close leaks its native handle/runtime lease. The standalone
-cleanup probe returns Busy(4) at final shutdown instead of success. The failure
-is intentionally asserted by the default suite, not skipped. Explicit close is
-mandatory; no isolate-exit cleanup guarantee is made. The 15 operation-handle
-tests pass. C ASan/UBSan smoke and binding regeneration checks pass; see
-[testing details](docs/testing.md). No mobile support result is claimed.
+Rust **24/24**, Dart **51/51**, C ASan/UBSan smoke **1/1**; complete host gate
+exit0, analyze clean. The previously failing owner-isolate cleanup regression now
+passes without skip or relaxed expectations. These are Linux-host results, not
+mobile support, stable ABI, release or security certification.
+
+## Resource ownership limits
+
+Prefer explicit close. Owner-exit cleanup has Linux tests for Isolate.run termination,
+natural quiescent exit and both VM kill priorities **after initialization/connection
+has completed**. GC fallback is tested under allocation pressure, not a timeliness
+promise. Kill during partial setup/connection allocation, process exit/crash/OS kill,
+unloading the engine/library and mobile hot restart have no cleanup guarantee.
+A live poll timer can keep an isolate alive; returning from an entrypoint is not
+itself a request to close a live connection. See [ownership](docs/ownership.md).
 
 ## Reproduce on Linux
 

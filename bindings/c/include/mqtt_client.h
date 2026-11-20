@@ -10,6 +10,11 @@
 #include <stdlib.h>
 
 /**
+ * Opaque VM handle. Only valid in a current Dart isolate/FFI scope.
+ */
+typedef struct _Dart_Handle _Dart_Handle;
+
+/**
  * Event metadata. Buffers are copied into caller memory by mqtt_client_poll.
  */
 typedef struct MqttEvent {
@@ -23,12 +28,24 @@ typedef struct MqttEvent {
   size_t payload_len;
 } MqttEvent;
 
+typedef struct _Dart_Handle *Dart_Handle;
+
+/**
+ * Native allocator deallocator, never a Dart trampoline.
+ */
+typedef void (*MqttNativeFree)(void*);
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
 
 int32_t mqtt_runtime_init(void);
 
+/**
+ * Pair a plain-C init reference; do not consume Dart owner-managed references.
+ * Allows up to two seconds for native-only owner-exit cleanup notification races,
+ * then applies the live-client/worker guard. Not a message drain or Dart handshake.
+ */
 int32_t mqtt_runtime_shutdown(void);
 
 /**
@@ -106,6 +123,67 @@ int32_t mqtt_client_close(uint64_t handle);
  * Idempotent numeric-handle release. Must close first. Never dereferences a handle.
  */
 int32_t mqtt_client_free(uint64_t handle);
+
+/**
+ * Initialize official Dart API DL and one process-wide native exit receiver.
+ * # Safety
+ * api must be NativeApi.initializeApiDLData from the current Dart VM.
+ */
+int32_t mqtt_dart_initialize(void *api);
+
+/**
+ * Return the native-only exit receiver's SendPort as a Dart handle.
+ * # Safety
+ * Requires successful mqtt_dart_initialize and a current Dart isolate/FFI scope.
+ */
+Dart_Handle mqtt_dart_exit_send_port(void);
+
+/**
+ * Acquire one runtime init reference for an isolate owner (maximum 64 owners).
+ * # Safety
+ * out must be aligned/writable. Dart users establish an exit listener before
+ * claiming owner-exit support; plain C users must explicitly release owners.
+ */
+int32_t mqtt_dart_owner_new(size_t *out);
+
+/**
+ * Pair an owner's runtime reference. Busy while it has registered clients.
+ */
+int32_t mqtt_dart_owner_shutdown(size_t owner);
+
+/**
+ * NativeFinalizer fallback for an inaccessible owner; encoded key, not a pointer.
+ * No Dart calls or blocking runtime destruction; repeated cleanup is harmless.
+ */
+void mqtt_dart_owner_finalize(void *token);
+
+/**
+ * Transfer ownership of all three full-sized caller buffers and one native handle.
+ * # Safety
+ * Buffers must be distinct allocations from the supplied native free function,
+ * sized/aligned for MqttEvent, 65535 topic bytes and 65536 payload bytes. Free must
+ * not be a Dart trampoline. On success caller must use client_release/finalize,
+ * never independently free buffers. out must be writable/aligned. No native event
+ * pointer is returned; these remain caller-owned poll copy destinations.
+ */
+int32_t mqtt_dart_client_register(size_t owner,
+                                  uint64_t handle,
+                                  struct MqttEvent *event,
+                                  uint8_t *topic,
+                                  uint8_t *payload,
+                                  MqttNativeFree free,
+                                  size_t *out);
+
+/**
+ * Once-only close -> free -> matching buffer deallocator; stale tokens are harmless.
+ */
+int32_t mqtt_dart_client_release(size_t token);
+
+/**
+ * NativeFinalizer callback: token is an encoded registry key, never dereferenced.
+ * Safe on arbitrary native threads; does not call Dart or block on a Tokio worker.
+ */
+void mqtt_dart_client_finalize(void *token);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -23,9 +23,6 @@ pub fn shutdown() -> Result<(), Error> {
     }
     let runtime = {
         let mut s = STATE.lock().map_err(|_| Error::Internal)?;
-        if s.1 == 0 {
-            return Ok(());
-        }
         if s.1 > 1 {
             s.1 -= 1;
             return Ok(());
@@ -50,4 +47,34 @@ pub fn acquire() -> Result<Arc<Runtime>, Error> {
         .0
         .clone()
         .ok_or(Error::NotInitialized)
+}
+
+/// Finalizer-safe reference release. Never blocks while dropping the last runtime.
+pub fn release_background() -> Result<(), Error> {
+    {
+        let mut s = STATE.lock().map_err(|_| Error::Internal)?;
+        if s.1 > 0 {
+            s.1 -= 1;
+        }
+    }
+    collect_idle_background()
+}
+pub fn collect_idle_background() -> Result<(), Error> {
+    let runtime = {
+        let mut s = STATE.lock().map_err(|_| Error::Internal)?;
+        if s.1 == 0 && s.0.as_ref().is_some_and(|r| Arc::strong_count(r) == 1) {
+            s.0.take()
+        } else {
+            None
+        }
+    };
+    if let Some(r) = runtime {
+        if let Ok(r) = Arc::try_unwrap(r) {
+            r.shutdown_background();
+        }
+    }
+    Ok(())
+}
+pub fn on_runtime_thread() -> bool {
+    tokio::runtime::Handle::try_current().is_ok()
 }

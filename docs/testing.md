@@ -1,74 +1,86 @@
-# Linux host testing and current failure
+# Linux host testing and validation limits
 
-This is an experimental Linux-host-tested MQTT3.1.1 TCP slice, not a mobile
-release. **The complete host gate is RED.** Do not treat selected green tests as
-release readiness or hide the known failing cleanup regression.
+Experimental Linux-host-tested MQTT3.1.1 TCP only. The complete host gate passes:
+**Rust24/24, Dart51/51, C ASan/UBSan smoke1/1**, exit0. This is not stable ABI,
+mobile support, release readiness or a security certification.
 
 ## Reproduce
 
 Install Rust with rustfmt/clippy, a C compiler, Dart, libclang for regeneration,
-and a Python virtual environment containing amqtt==0.12.2. In
-`examples/flutter/mqtt_flutter`, run `dart pub get`, then at repository root:
+and a Python virtual environment containing amqtt==0.12.2. Run `dart pub get`
+in examples/flutter/mqtt_flutter, then at repository root:
 
 ```sh
 MQTT_TEST_PYTHON="${VIRTUAL_ENV}/bin/python" scripts/test-host.sh
+cargo test --workspace --locked --no-fail-fast
+scripts/generate-bindings.sh
 ```
 
-CARGO, DART, CC and MQTT_TEST_PYTHON override executable locations. The fixture
-starts a temporary independent aMQTT broker on127.0.0.1 and an ephemeral port,
-then stops it. No external account, real password, key or public broker is needed.
-For bindings, build mqtt-c with cbindgen installed through its build dependency
-and run scripts/generate-bindings.sh with libclang. Optional LIBCLANG_ROOT and
-C_INCLUDE_DIR select LLVM and standard headers. Generated files are committed;
-raw logs, local machine configuration, caches and build outputs are not.
+CARGO, DART, CC, MQTT_TEST_PYTHON override executable locations. LIBCLANG_ROOT
+and C_INCLUDE_DIR select LLVM/C headers for ffigen. The fixture starts and stops
+an independent temporary aMQTT broker on127.0.0.1 with an ephemeral port. No real
+password, public broker or external account is required. Logs/caches/build output
+and local machine configuration are not distributed with this source snapshot.
+Official Dart API DL glue is vendored with its license; building C does not
+require linking a Dart VM library. Generated bindings are not hand-maintained.
 
-## Recorded result — 2026-11-19 (Asia/Shanghai)
+## Recorded Linux result
 
-Linux x86_64, Rust1.100.0, Dart3.14.0, aMQTT0.12.2:
+Linux x86_64, Rust1.100.0, Dart3.14.0, amqtt0.12.2, rumqttc0.25.1/Tokio1.54.1:
 
 | Check | Exit | Result |
 | --- | --- | --- |
-| cargo fmt --all -- --check |0| PASS |
-| cargo clippy --workspace --all-targets --locked -- -D warnings |0| PASS |
-| cargo test --workspace --locked --no-fail-fast |0|22 PASS,0 FAIL,0 ignored |
-| cargo test -p mqtt-c --locked --no-fail-fast |0|5 PASS (already included in22) |
-| C11 smoke executable with ASan/UBSan and aMQTT |0|1 executable PASS |
-| dart analyze --fatal-infos |0| No issues |
-| dart test --concurrency=1 |1|39 tests:38 PASS,1 FAIL (owner-isolate exit cleanup) |
-| operation_handle_test.dart |0|15 PASS; three consecutive focused runs |
-| operation_handle_test.dart + lifecycle_test.dart |0|28 PASS |
-| standalone isolate_exit_probe.dart |1| final shutdown expected0, actual Busy(4) |
-| scripts/test-host.sh |1| only the owner-isolate cleanup regression fails |
-| forced cbindgen build + ffigen regeneration |0| identical header/bindings hashes |
+| cargo fmt --all -- --check |0|PASS|
+| cargo clippy --workspace --all-targets --locked -- -D warnings |0|PASS|
+| cargo test --workspace --locked --no-fail-fast |0|24pass/0fail/0ignored|
+| C11 executable with ASan/UBSan and aMQTT |0|1 fixture passed|
+| dart analyze --fatal-infos |0|No issues|
+| dart test --concurrency=1 |0|51pass/0fail|
+| operation_handle_test.dart + lifecycle_test.dart |0|28pass (15+13), included in51|
+| standalone isolate_exit_probe.dart |0|shutdown expected0/actual0|
+| scripts/test-host.sh |0|Complete host gate passes|
+| clean cbindgen build + ffigen |0|Stable generated header/bindings hashes|
 
-## Known failure is not skipped
+The existing owner-isolate regression now passes: the assertion still expects
+successful cleanup; no skip, ignore, inverted expectation or should-fail marker
+was introduced. Seven subprocess modes cover completed-setup Isolate.run exit,
+quiescent natural return after repeated close, init-only exits, both VM kill
+priorities, concurrent mixed owners, and GC pressure. GC scheduling has no deadline
+promise. Some exit probes call shutdown before observing NotInitialized, so they
+alone do not prove automatic pairing of a single owner init ref; observer-only
+coverage remains a useful follow-up test-strengthening opportunity.
 
-`ffi_ownership_test.dart` runs `test/probes/isolate_exit_probe.dart` in a child OS
-process. An owner isolate exits without close, leaking its native handle/runtime
-lease; final shutdown returns Busy(4) instead of0. The parent expects successful
-cleanup and therefore fails. No skip, ignore or should-fail annotation is used.
-Do not run the deliberately leaking probe inside a long-lived production process.
-Normal explicit close remains mandatory; no Finalizer or hot-restart/forced-death
-reclamation guarantee is implemented.
+Native tests cover64-owner and64-buffer quotas, retiring buffers while deallocation
+is blocked,32 rounds of poll/release/finalizer races with exactly3 frees per buffer
+set, and safe last-ref background release from a runtime worker. Output buffers
+used by race tests remain independently valid. This is not permission to read a
+caller allocation after release.
 
-## Coverage and limits
-
-Close/poll tests cover Closed rather than Empty after close, retained-message
-suppression after BufferTooSmall, and late producer rejection. Other tests cover
-CONNACK/SUBACK/UNSUBACK gating, keepalive0 on wire and explicit1-second PING,
-QoS1 redelivery, bounded command/event overflow, input/output ownership and binary
-buffer retry, reconnect after disconnect, and live-client runtime shutdown refusal.
-
-The15 new operation-handle tests cover immediate ids and pre-native local cancel,
-late ACK isolation, independent first/joiner disconnect cancellation, repeated raw
-cancel(id), first deadline preservation, reentrant close/cancel, committed results
-before synchronous listeners, and bounded cancelled-join bookkeeping. Existing
-publish-ticket tests retain Queued/Sent/ACK and QoS0 no-ACK behavior. Local once-only
+Pause/backpressure retains queued SUBACK, Queued/Sent/PUBACK and124 messages before
+terminal Overflow (128normal slots); existing message-only128-slot coverage also
+remains. Payload65537 is rejected;65536 is sent and loopback received intact.
+Wire cap131080 includes topic/framing while application payload cap stays65536.
+Three scheduling/listener tests cover idle backoff, reentrant wake, and listener17
+rejection. Existing close/poll Closed semantics, late ACK/timeout/cancel isolation,
+keepalive0 encoding, QoS0 no-ACK and QoS1 redelivery remain covered. Local once-only
 settlement is not MQTT exactly-once delivery.
 
-Peers: bounded scripted loopback wire peers and independent aMQTT0.12.2. A second
-Mosquitto broker was not tested. C ASan/UBSan instruments the C executable, not
-Rust dependencies. No TLS/mTLS, successful MQTT5, WS/WSS, auto reconnect, durable
-recovery, drain, Miri/fuzz/TSan, full-Rust sanitizers, remote CI, Android/iOS cross-build,
-Flutter plugin packaging, simulator, physical-device, signing or background result
-is claimed. See device-smoke.md before making mobile claims.
+## Finite memory observation
+
+One Linux VM/JIT sample used128 sequential owners,64 explicit closes and64 implicit
+exits. RSS after1/16/32/64/96/128 owners was184053760/185348096/185749504/186818560/
+186114048/186892288 bytes, peak254337024. Shutdown returned0 and subsequent
+client_new returned NotInitialized2. This is an observation, not a leak proof,
+RSS ceiling or cleanup-latency guarantee. Deterministic native free/quota counting
+is separate evidence. See [ownership](ownership.md) for allocation accounting.
+
+## Not verified
+
+C sanitizer flags instrument the C executable, not the full Rust dependency tree.
+No whole-Rust ASan, TSan, Miri, fuzzing, OOM injection, remote CI, second Mosquitto,
+TLS/mTLS, successful MQTT5, WS/WSS, auto reconnect, durable recovery or drain result
+is claimed. No Android/iOS cross-build, static-plugin multi-link, AOT finalizer,
+Flutter hot restart, engine teardown, simulator or physical-device result exists.
+Initialization/registration-midway kill and process/VM crash are not guaranteed;
+Tokio blocking/DNS work may outlive background shutdown. Explicit close remains
+preferred. See [mobile gates](device-smoke.md) and [ownership](ownership.md).

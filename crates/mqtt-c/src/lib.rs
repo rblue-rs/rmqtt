@@ -1,4 +1,6 @@
 //! Experimental polling C ABI. Caller-owned buffers; no cross-thread callbacks.
+mod ownership;
+
 use mqtt_api::{Error, Options};
 use mqtt_core::Client;
 use std::{
@@ -63,8 +65,14 @@ unsafe fn text(p: *const u8, len: usize) -> Result<String, Error> {
 pub extern "C" fn mqtt_runtime_init() -> i32 {
     boundary(mqtt_runtime::init)
 }
+/// Pair a plain-C init reference; do not consume Dart owner-managed references.
+/// Allows up to two seconds for native-only owner-exit cleanup notification races,
+/// then applies the live-client/worker guard. Not a message drain or Dart handshake.
 #[no_mangle]
 pub extern "C" fn mqtt_runtime_shutdown() -> i32 {
+    // A VM exit message can race its final reply to another isolate. Waiting
+    // here is native-only, bounded, and never waits for a Dart callback.
+    ownership::wait_for_exit_cleanup();
     boundary(mqtt_runtime::shutdown)
 }
 /// # Safety

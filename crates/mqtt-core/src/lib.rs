@@ -116,6 +116,8 @@ impl Command {
         }
     }
 }
+// Packet limits include topic/packet-id/remaining-length framing, not only payload.
+const MAX_WIRE_PACKET: usize = MAX_PAYLOAD + u16::MAX as usize + 9;
 pub struct Client {
     stop: Arc<Notify>,
     runtime: Arc<Runtime>,
@@ -178,7 +180,7 @@ impl Client {
         let mut opts = MqttOptions::new(options.client_id, options.server, options.port);
         opts.set_keep_alive(options.keep_alive)
             .set_manual_acks(true)
-            .set_max_packet_size(MAX_PAYLOAD + 65536, MAX_PAYLOAD);
+            .set_max_packet_size(MAX_WIRE_PACKET, MAX_WIRE_PACKET);
         let (client, mut engine) = AsyncClient::new(opts, 4);
         engine.network_options.set_connection_timeout(5);
         let (tx, rx) = mpsc::channel(32);

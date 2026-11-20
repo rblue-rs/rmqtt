@@ -21,7 +21,8 @@ must not be required for correctness of the current polling path.
   Rust enums, references or allocator-owned event pointers across the boundary.
   cbindgen/ffigen generate the header/bindings; do not hand-edit generated files.
 - Native copies accepted inputs synchronously. Caller output buffers stay valid,
-  aligned, writable and nonoverlapping for the entire poll. Native retains none.
+  aligned, writable and nonoverlapping for the entire poll. Poll retains none;
+  the ownership registry separately records their addresses for exact cleanup.
 - Empty leaves output untouched. BufferTooSmall writes required metadata only,
   retaining the same event. Success copies one event and then removes it.
 - Handles are monotonically increasing nonzero u64 table keys, never reused in
@@ -54,9 +55,22 @@ must not be required for correctness of the current polling path.
 
 ## Limitations
 
-Explicit close is mandatory. Exiting an owner isolate without close currently
-leaks a handle/runtime lease; the child-process cleanup test remains failing.
-No Finalizer, forced-isolate-exit or hot-restart reclamation guarantee exists.
+Explicit close is preferred. NativeFinalizer is only GC/group-shutdown fallback;
+individual owner exit uses a scalar Dart-to-native port. No MQTT data or pointers
+travel on that channel. Eight additive helpers initialize API DL, obtain the
+native exit SendPort, acquire/shutdown/finalize an owner, and register/release/
+finalize a buffer set. They do not alter event/option layouts or status codes.
+Dart_Handle uses FFI Handle/Object, not a raw Dart-heap pointer. Matching allocator
+cleanup is once-only; retiring resources retain their quota. Automatic last-ref
+release uses Tokio shutdown_background, explicit shutdown preserves Busy guards.
+No Dart cleanup callback, drain or handshake is introduced.
+
+The owner-exit regression now passes without relaxed expectations. Supported
+Linux tests require completed initialization/connection registration. Partial
+setup kill, process exit/crash/VM abort, Flutter hot restart, engine/library unload
+and mobile are not guaranteed. Background shutdown may leave blocking/DNS work
+running; no immediate whole-process memory/thread reclamation is promised.
+See [ownership](../ownership.md) for the complete support matrix.
 Local once-only Future settlement is not MQTT exactly-once delivery. QoS0 has no
 acknowledgement, Sent is not remote receipt, and PUBACK is not application processing.
 
@@ -64,4 +78,4 @@ Keep rumqttc0.25.1 / Tokio / rustls / cbindgen / ffigen without an upstream fork
 Default keepAlivePeriod is0. MQTT5 is typed Unsupported, never silently rewritten
 to a different keepalive. No automatic reconnect, durable outbox, cross-process
 QoS recovery, TLS or mobile validation is implied. See [semantics](../semantics.md)
-and [testing](../testing.md) for current behavior and the known failing gate.
+and [testing](../testing.md) for current behavior and validation limits.

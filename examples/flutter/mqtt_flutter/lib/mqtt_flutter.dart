@@ -8,6 +8,8 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'src/ffi_bindings.dart';
+import 'src/native_client.dart';
+import 'src/event_pump.dart';
 
 enum MqttQos { atMostOnce, atLeastOnce }
 
@@ -129,55 +131,13 @@ Completer<T> _completer<T>() {
   return c;
 }
 
-/// Pause applies backpressure to the native poller; no unbounded Dart pause queue.
-/// While paused, native bounded queues can terminate the connection with Overflow.
-class _EventStream<T> {
-  final Map<MultiStreamController<T>, bool> _listeners = {};
-  bool _closed = false;
-  bool get paused => _listeners.values.any((v) => v);
-  late final Stream<T> stream = Stream<T>.multi((c) {
-    if (_closed) {
-      c.closeSync();
-      return;
-    }
-    if (_listeners.length >= 16) {
-      c.addErrorSync(StateError('Too many listeners'));
-      c.closeSync();
-      return;
-    }
-    _listeners[c] = false;
-    c.onPause = () {
-      _listeners[c] = true;
-    };
-    c.onResume = () {
-      _listeners[c] = false;
-    };
-    c.onCancel = () {
-      _listeners.remove(c);
-    };
-  }, isBroadcast: true);
-  void add(T value) {
-    for (final c in _listeners.keys.toList()) {
-      c.addSync(value);
-    }
-  }
-
-  void close() {
-    _closed = true;
-    for (final c in _listeners.keys.toList()) {
-      c.closeSync();
-    }
-    _listeners.clear();
-  }
-}
-
-class MqttClient {
+class MqttClient implements Finalizable {
   final String server;
   final String clientId;
   final int port;
   static MqttBindings? _bindings;
-  static bool _initialized = false;
-  static int _live = 0;
+  static NativeRuntimeOwner? _runtimeOwner;
+  static Future<void>? _initializing;
   static MqttBindings get _ffi => _bindings ??= MqttBindings(Platform.isIOS
       ? DynamicLibrary.process()
       : DynamicLibrary.open(Platform.environment['MQTT_NATIVE_LIBRARY'] ??
@@ -190,31 +150,48 @@ class MqttClient {
     if (code != 0) throw MqttException(code);
   }
 
-  static Future<void> ensureInitialized() async {
-    if (!_initialized) {
-      _check(_ffi.mqtt_runtime_init());
-      _initialized = true;
-    }
+  static Future<void> ensureInitialized() {
+    final pending = _initializing;
+    if (pending != null) return pending;
+    if (_runtimeOwner != null) return Future.value();
+    final future = () async {
+      final owner = NativeRuntimeOwner.create(_ffi, _check);
+      _runtimeOwner = owner;
+      await owner.ready();
+    }();
+    _initializing = future;
+    future.then<void>((_) {
+      _initializing = null;
+    }, onError: (Object e, StackTrace s) {
+      _initializing = null;
+    });
+    return future;
   }
 
   static Future<void> shutdownRuntime() async {
-    if (_live != 0) {
+    final pending = _initializing;
+    if (pending != null) await pending;
+    final owner = _runtimeOwner;
+    if (owner == null) return;
+    final code = owner.shutdown();
+    if (code == 4) {
       throw StateError('Close every client before shutdownRuntime');
     }
-    if (_initialized) {
-      _check(_ffi.mqtt_runtime_shutdown());
-      _initialized = false;
-    }
+    _check(code);
+    _runtimeOwner = null;
   }
 
   MqttClient({required this.server, required this.clientId, this.port = 1883}) {
     if (server.isEmpty || clientId.isEmpty || port < 1 || port > 65535) {
       throw ArgumentError('Invalid MQTT endpoint');
     }
+    for (final stream in [_messages, _events, _updates]) {
+      stream.onResume = () => _pump?.wake();
+    }
   }
-  final _messages = _EventStream<MqttReceivedMessage>();
-  final _events = _EventStream<MqttClientEvent>();
-  final _updates = _EventStream<MqttPublishUpdate>();
+  final _messages = EventStream<MqttReceivedMessage>();
+  final _events = EventStream<MqttClientEvent>();
+  final _updates = EventStream<MqttPublishUpdate>();
   Stream<MqttReceivedMessage> get messages => _messages.stream;
   Stream<MqttClientEvent> get events => _events.stream;
   Stream<MqttPublishUpdate> get publishUpdates => _updates.stream;
@@ -224,9 +201,11 @@ class MqttClient {
   MqttConnectionStatus? get connectionStatus => _status;
   bool _closed = false;
   bool _polling = false;
-  int _handle = 0;
+  NativeClient? _native;
+  int get _handle => _native?.handle ?? 0;
   int _operation = 0;
-  Timer? _timer;
+  EventPump? _pump;
+  late final bool Function() _pollCallback = _poll;
   int _generation = 0;
   Future<void>? _disconnectFuture;
   int? _disconnectPhysicalId;
@@ -234,9 +213,9 @@ class MqttClient {
   final Map<int, Timer> _timeouts = {};
   final Map<int, _ControlWaiter> _controlWaiters = {};
   final Map<int, _ControlWaiter> _starting = {};
-  Pointer<MqttEvent> _event = nullptr;
-  Pointer<Uint8> _topic = nullptr;
-  Pointer<Uint8> _payload = nullptr;
+  Pointer<MqttEvent> get _event => _native?.event ?? nullptr;
+  Pointer<Uint8> get _topic => _native?.topic ?? nullptr;
+  Pointer<Uint8> get _payload => _native?.payload ?? nullptr;
   final Map<int, Completer<Object?>> _operations = {};
   final Map<int, MqttPublishTicket> _tickets = {};
   void _openGuard() {
@@ -255,21 +234,9 @@ class MqttClient {
     if (generation != _generation) {
       throw StateError('Connection attempt stopped');
     }
-    using((arena) {
-      final host = utf8.encode(server), id = utf8.encode(clientId);
-      final hp = arena<Uint8>(host.length),
-          ip = arena<Uint8>(id.length),
-          out = arena<Uint64>();
-      hp.asTypedList(host.length).setAll(0, host);
-      ip.asTypedList(id.length).setAll(0, id);
-      _check(_ffi.mqtt_client_new(hp, host.length, ip, id.length, port, out));
-      _handle = out.value;
-    });
-    _live++;
-    _event = calloc<MqttEvent>();
-    _topic = calloc<Uint8>(65535);
-    _payload = calloc<Uint8>(65536);
-    _timer = Timer.periodic(const Duration(milliseconds: 5), (_) => _poll());
+    _native = NativeClient.create(
+        _ffi, _check, _runtimeOwner!.id, server, clientId, port);
+    _pump = EventPump(_pollCallback);
   }
 
   MqttOperation<T> _begin<T>(Future<T> Function(int) launch,
@@ -325,6 +292,7 @@ class MqttClient {
     _operations[op] = c;
     try {
       _check(send());
+      _pump?.wake();
       if (starting?.cancelled ?? false) {
         _operations.remove(op);
         c.completeError(MqttOperationCancelled(op));
@@ -478,6 +446,7 @@ class MqttClient {
                 return _ffi.mqtt_client_publish(_handle, op, p, len, data,
                     payload.length, qos.index, retain ? 1 : 0);
               })));
+      _pump?.wake();
     } catch (error) {
       _tickets.remove(op);
       ticket._fail(error);
@@ -553,8 +522,9 @@ class MqttClient {
     }
   }
 
-  void _poll() {
-    if (_closed || _polling || _handle == 0) return;
+  bool _poll() {
+    if (_closed || _polling || _handle == 0) return false;
+    var work = false;
     _polling = true;
     try {
       for (var i = 0; i < 64 && !_closed && _handle != 0; i++) {
@@ -563,6 +533,7 @@ class MqttClient {
             _handle, _event, _topic, 65535, _payload, 65536);
         if (code == 10) break;
         _check(code);
+        work = true;
         final e = _event.ref, op = e.operation_id;
         final kind = e.kind, error = e.code;
         if (kind == 6) {
@@ -626,6 +597,7 @@ class MqttClient {
     } finally {
       _polling = false;
     }
+    return work;
   }
 
   void _failPending(Object error, {bool preserveDisconnectWaiters = false}) {
@@ -650,21 +622,12 @@ class MqttClient {
 
   void _releaseNative(Object error, {bool preserveDisconnectWaiters = false}) {
     _generation++;
-    _timer?.cancel();
-    _timer = null;
-    if (_handle != 0) {
-      _check(_ffi.mqtt_client_close(_handle));
-      _check(_ffi.mqtt_client_free(_handle));
-      _handle = 0;
-      _live--;
-    }
-    if (_event != nullptr) {
-      calloc.free(_event);
-      calloc.free(_topic);
-      calloc.free(_payload);
-      _event = nullptr;
-      _topic = nullptr;
-      _payload = nullptr;
+    _pump?.close();
+    _pump = null;
+    final native = _native;
+    if (native != null) {
+      _check(native.release());
+      _native = null;
     }
     _failPending(error, preserveDisconnectWaiters: preserveDisconnectWaiters);
   }

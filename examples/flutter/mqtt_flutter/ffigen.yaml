@@ -1,6 +1,7 @@
 name: MqttBindings
 description: Generated from the experimental C header. Do not edit.
 output: lib/src/ffi_bindings.dart
+use-dart-handle: true
 headers:
   entry-points:
     - ../../../bindings/c/include/mqtt_client.h
@@ -9,6 +10,10 @@ headers:
 functions:
   include:
     - 'mqtt_.*'
+  symbol-address:
+    include:
+      - mqtt_dart_client_finalize
+      - mqtt_dart_owner_finalize
 structs:
   include:
     - MqttEvent
