@@ -29,6 +29,9 @@ class MqttBindings {
   late final _mqtt_runtime_init =
       _mqtt_runtime_initPtr.asFunction<int Function()>();
 
+  /// Pair a plain-C init reference; do not consume Dart owner-managed references.
+  /// Allows up to two seconds for native-only owner-exit cleanup notification races,
+  /// then applies the live-client/worker guard. Not a message drain or Dart handshake.
   int mqtt_runtime_shutdown() {
     return _mqtt_runtime_shutdown();
   }
@@ -72,26 +75,117 @@ class MqttBindings {
       int Function(ffi.Pointer<ffi.Uint8>, int, ffi.Pointer<ffi.Uint8>, int,
           int, ffi.Pointer<ffi.Uint64>)>();
 
+  /// # Safety
+  /// `ca_pem` must reference `ca_pem_len` readable bytes when non-null.
+  /// A null pointer is allowed only when `ca_pem_len` is zero, which means no
+  /// custom CA: if `use_tls` is 1, the host system roots are used. `use_tls`
+  /// must be 0 or 1. Providing a CA without TLS is rejected.
+  /// Username and password pointers are copied immediately; null + zero length
+  /// means the field is absent. `allow_plaintext_credentials` and `will_retain`
+  /// must be 0 or 1. A will is absent when `will_topic` is null and
+  /// `will_topic_len` is zero.
+  /// `client_cert_pem` and `client_key_pem` are copied immediately; null + zero
+  /// length means the field is absent. Both must be provided together and only
+  /// when `use_tls` is 1. They are not written to disk.
   int mqtt_client_connect(
     int handle,
     int op,
     int protocol,
     int keep_alive_seconds,
+    int use_tls,
+    ffi.Pointer<ffi.Uint8> ca_pem,
+    int ca_pem_len,
+    ffi.Pointer<ffi.Uint8> username,
+    int username_len,
+    ffi.Pointer<ffi.Uint8> password,
+    int password_len,
+    int allow_plaintext_credentials,
+    ffi.Pointer<ffi.Uint8> will_topic,
+    int will_topic_len,
+    ffi.Pointer<ffi.Uint8> will_payload,
+    int will_payload_len,
+    int will_qos,
+    int will_retain,
+    ffi.Pointer<ffi.Uint8> client_cert_pem,
+    int client_cert_pem_len,
+    ffi.Pointer<ffi.Uint8> client_key_pem,
+    int client_key_pem_len,
   ) {
     return _mqtt_client_connect(
       handle,
       op,
       protocol,
       keep_alive_seconds,
+      use_tls,
+      ca_pem,
+      ca_pem_len,
+      username,
+      username_len,
+      password,
+      password_len,
+      allow_plaintext_credentials,
+      will_topic,
+      will_topic_len,
+      will_payload,
+      will_payload_len,
+      will_qos,
+      will_retain,
+      client_cert_pem,
+      client_cert_pem_len,
+      client_key_pem,
+      client_key_pem_len,
     );
   }
 
   late final _mqtt_client_connectPtr = _lookup<
       ffi.NativeFunction<
-          ffi.Int32 Function(ffi.Uint64, ffi.Uint64, ffi.Uint8,
-              ffi.Uint16)>>('mqtt_client_connect');
-  late final _mqtt_client_connect =
-      _mqtt_client_connectPtr.asFunction<int Function(int, int, int, int)>();
+          ffi.Int32 Function(
+              ffi.Uint64,
+              ffi.Uint64,
+              ffi.Uint8,
+              ffi.Uint16,
+              ffi.Uint8,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Uint8,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Uint8,
+              ffi.Uint8,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size)>>('mqtt_client_connect');
+  late final _mqtt_client_connect = _mqtt_client_connectPtr.asFunction<
+      int Function(
+          int,
+          int,
+          int,
+          int,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          int,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int)>();
 
   /// # Safety
   /// topic must reference topic_len readable bytes.
@@ -233,6 +327,8 @@ class MqttBindings {
           ffi.Pointer<ffi.Uint8>, int)>();
 
   /// Prototype force-close, idempotent; aborts pending work. No graceful drain promise.
+  /// After a successful close, the handle stays Closed until free; poll and other
+  /// operations except repeated close/free return Closed and cannot deliver events.
   int mqtt_client_close(
     int handle,
   ) {
@@ -261,6 +357,169 @@ class MqttBindings {
           'mqtt_client_free');
   late final _mqtt_client_free =
       _mqtt_client_freePtr.asFunction<int Function(int)>();
+
+  /// Initialize official Dart API DL and one process-wide native exit receiver.
+  /// # Safety
+  /// api must be NativeApi.initializeApiDLData from the current Dart VM.
+  int mqtt_dart_initialize(
+    ffi.Pointer<ffi.Void> api,
+  ) {
+    return _mqtt_dart_initialize(
+      api,
+    );
+  }
+
+  late final _mqtt_dart_initializePtr =
+      _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Pointer<ffi.Void>)>>(
+          'mqtt_dart_initialize');
+  late final _mqtt_dart_initialize = _mqtt_dart_initializePtr
+      .asFunction<int Function(ffi.Pointer<ffi.Void>)>();
+
+  /// Return the native-only exit receiver's SendPort as a Dart handle.
+  /// # Safety
+  /// Requires successful mqtt_dart_initialize and a current Dart isolate/FFI scope.
+  Object mqtt_dart_exit_send_port() {
+    return _mqtt_dart_exit_send_port();
+  }
+
+  late final _mqtt_dart_exit_send_portPtr =
+      _lookup<ffi.NativeFunction<ffi.Handle Function()>>(
+          'mqtt_dart_exit_send_port');
+  late final _mqtt_dart_exit_send_port =
+      _mqtt_dart_exit_send_portPtr.asFunction<Object Function()>();
+
+  /// Acquire one runtime init reference for an isolate owner (maximum 64 owners).
+  /// # Safety
+  /// out must be aligned/writable. Dart users establish an exit listener before
+  /// claiming owner-exit support; plain C users must explicitly release owners.
+  int mqtt_dart_owner_new(
+    ffi.Pointer<ffi.Size> out,
+  ) {
+    return _mqtt_dart_owner_new(
+      out,
+    );
+  }
+
+  late final _mqtt_dart_owner_newPtr =
+      _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Pointer<ffi.Size>)>>(
+          'mqtt_dart_owner_new');
+  late final _mqtt_dart_owner_new =
+      _mqtt_dart_owner_newPtr.asFunction<int Function(ffi.Pointer<ffi.Size>)>();
+
+  /// Pair an owner's runtime reference. Busy while it has registered clients.
+  int mqtt_dart_owner_shutdown(
+    int owner,
+  ) {
+    return _mqtt_dart_owner_shutdown(
+      owner,
+    );
+  }
+
+  late final _mqtt_dart_owner_shutdownPtr =
+      _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Size)>>(
+          'mqtt_dart_owner_shutdown');
+  late final _mqtt_dart_owner_shutdown =
+      _mqtt_dart_owner_shutdownPtr.asFunction<int Function(int)>();
+
+  /// NativeFinalizer fallback for an inaccessible owner; encoded key, not a pointer.
+  /// No Dart calls or blocking runtime destruction; repeated cleanup is harmless.
+  void mqtt_dart_owner_finalize(
+    ffi.Pointer<ffi.Void> token,
+  ) {
+    return _mqtt_dart_owner_finalize(
+      token,
+    );
+  }
+
+  late final _mqtt_dart_owner_finalizePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
+          'mqtt_dart_owner_finalize');
+  late final _mqtt_dart_owner_finalize = _mqtt_dart_owner_finalizePtr
+      .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
+
+  /// Transfer ownership of all three full-sized caller buffers and one native handle.
+  /// # Safety
+  /// Buffers must be distinct allocations from the supplied native free function,
+  /// sized/aligned for MqttEvent, 65535 topic bytes and 65536 payload bytes. Free must
+  /// not be a Dart trampoline. On success caller must use client_release/finalize,
+  /// never independently free buffers. out must be writable/aligned. No native event
+  /// pointer is returned; these remain caller-owned poll copy destinations.
+  int mqtt_dart_client_register(
+    int owner,
+    int handle,
+    ffi.Pointer<MqttEvent> event,
+    ffi.Pointer<ffi.Uint8> topic,
+    ffi.Pointer<ffi.Uint8> payload,
+    MqttNativeFree free,
+    ffi.Pointer<ffi.Size> out,
+  ) {
+    return _mqtt_dart_client_register(
+      owner,
+      handle,
+      event,
+      topic,
+      payload,
+      free,
+      out,
+    );
+  }
+
+  late final _mqtt_dart_client_registerPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Int32 Function(
+              ffi.Size,
+              ffi.Uint64,
+              ffi.Pointer<MqttEvent>,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Pointer<ffi.Uint8>,
+              MqttNativeFree,
+              ffi.Pointer<ffi.Size>)>>('mqtt_dart_client_register');
+  late final _mqtt_dart_client_register =
+      _mqtt_dart_client_registerPtr.asFunction<
+          int Function(int, int, ffi.Pointer<MqttEvent>, ffi.Pointer<ffi.Uint8>,
+              ffi.Pointer<ffi.Uint8>, MqttNativeFree, ffi.Pointer<ffi.Size>)>();
+
+  /// Once-only close -> free -> matching buffer deallocator; stale tokens are harmless.
+  int mqtt_dart_client_release(
+    int token,
+  ) {
+    return _mqtt_dart_client_release(
+      token,
+    );
+  }
+
+  late final _mqtt_dart_client_releasePtr =
+      _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Size)>>(
+          'mqtt_dart_client_release');
+  late final _mqtt_dart_client_release =
+      _mqtt_dart_client_releasePtr.asFunction<int Function(int)>();
+
+  /// NativeFinalizer callback: token is an encoded registry key, never dereferenced.
+  /// Safe on arbitrary native threads; does not call Dart or block on a Tokio worker.
+  void mqtt_dart_client_finalize(
+    ffi.Pointer<ffi.Void> token,
+  ) {
+    return _mqtt_dart_client_finalize(
+      token,
+    );
+  }
+
+  late final _mqtt_dart_client_finalizePtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
+          'mqtt_dart_client_finalize');
+  late final _mqtt_dart_client_finalize = _mqtt_dart_client_finalizePtr
+      .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
+
+  late final addresses = _SymbolAddresses(this);
+}
+
+class _SymbolAddresses {
+  final MqttBindings _library;
+  _SymbolAddresses(this._library);
+  ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>
+      get mqtt_dart_owner_finalize => _library._mqtt_dart_owner_finalizePtr;
+  ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>
+      get mqtt_dart_client_finalize => _library._mqtt_dart_client_finalizePtr;
 }
 
 /// Event metadata. Buffers are copied into caller memory by mqtt_client_poll.
@@ -289,3 +548,10 @@ final class MqttEvent extends ffi.Struct {
   @ffi.Size()
   external int payload_len;
 }
+
+typedef MqttNativeFreeFunction = ffi.Void Function(ffi.Pointer<ffi.Void>);
+typedef DartMqttNativeFreeFunction = void Function(ffi.Pointer<ffi.Void>);
+
+/// Native allocator deallocator, never a Dart trampoline.
+typedef MqttNativeFree
+    = ffi.Pointer<ffi.NativeFunction<MqttNativeFreeFunction>>;

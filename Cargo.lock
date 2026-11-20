@@ -389,6 +389,7 @@ name = "mqtt-c"
 version = "0.1.0"
 dependencies = [
  "cbindgen",
+ "cc",
  "mqtt-api",
  "mqtt-core",
  "mqtt-runtime",
@@ -401,6 +402,9 @@ dependencies = [
  "mqtt-api",
  "mqtt-runtime",
  "rumqttc",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pemfile",
  "tokio",
 ]
 

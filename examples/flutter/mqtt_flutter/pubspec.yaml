@@ -1,12 +1,23 @@
 name: mqtt_flutter
 version: 0.1.0
 publish_to: none
-description: Experimental Rust MQTT FFI vertical slice (not a packaged Flutter plugin).
+description: Experimental Rust MQTT FFI slice packaged as a Flutter FFI plugin skeleton (not a published plugin).
 environment:
   sdk: '>=3.4.0 <4.0.0'
+  flutter: '>=3.50.0'
 dependencies:
+  flutter:
+    sdk: flutter
   ffi: ^2.1.3
 dev_dependencies:
   ffigen: ^20.1.1
   test: ^1.25.0
   lints: ^6.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        ffiPlugin: true
+      ios:
+        ffiPlugin: true

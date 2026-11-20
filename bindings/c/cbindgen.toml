@@ -3,3 +3,6 @@ include_guard = "MQTT_CLIENT_EXPERIMENTAL_H"
 cpp_compat = true
 usize_is_size_t = true
 header = "/* EXPERIMENTAL ABI: host vertical slice, not a stable release. */"
+
+[export]
+exclude = ["rmqtt_dart_initialize", "rmqtt_dart_send_port"]

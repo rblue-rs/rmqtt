@@ -9,6 +9,10 @@ import 'package:test/test.dart';
 void main() {
   test('default keepalive remains zero', () {
     expect(const MqttConnectOptions().keepAlivePeriod, Duration.zero);
+    expect(const MqttConnectOptions().useTls, isFalse);
+    expect(const MqttConnectOptions().caPem, isNull);
+    expect(const MqttConnectOptions().clientCertPem, isNull);
+    expect(const MqttConnectOptions().clientKeyPem, isNull);
   });
   test('Dart -> C ABI -> Rust -> broker and reusable disconnect', () async {
     final c = MqttClient(

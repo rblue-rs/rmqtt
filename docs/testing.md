@@ -1,53 +1,102 @@
-# Host testing and validation limits
+# Linux host testing and validation limits
 
-This is an experimental Linux-host-tested vertical slice, not a mobile release.
+Experimental Linux-host-tested MQTT 3.1.1 over TCP and host TLS/mTLS. The
+complete host gate passes: **Rust 76/76, Dart 76/76, C ASan/UBSan smoke 1/1**,
+exit 0. This is not a stable ABI, physical-device support, release readiness,
+or a security certification. A local pass is not a GitHub Actions result.
 
 ## Reproduce
 
-Install Rust (rustfmt/clippy), a C compiler, Dart and a Python virtual environment
-with `amqtt==0.12.2`. Run `dart pub get` in `examples/flutter/mqtt_flutter`.
+Install Rust 1.100.0 with rustfmt/clippy (`rust-toolchain.toml`), a C compiler,
+Dart 3.14.0, Flutter 3.50.x (required for `dart pub get` because the Dart
+package declares a Flutter FFI plugin), libclang for regeneration, and a Python
+virtual environment containing `amqtt==0.12.2`. Then at the repository root:
 
 ```sh
-MQTT_TEST_PYTHON=/path/to/venv/bin/python scripts/test-host.sh
+MQTT_TEST_PYTHON="${VIRTUAL_ENV}/bin/python" scripts/ci-host.sh
 ```
 
-`CARGO`, `DART`, `CC` and `MQTT_TEST_PYTHON` can override executable locations.
-The script starts a temporary independent aMQTT broker on 127.0.0.1 and an
-ephemeral port, runs its checks, and stops the broker. No external MQTT account,
-public broker, real password, certificate, or private key is bundled.
+`scripts/ci-host.sh` runs `dart pub get`, `scripts/test-host.sh` (fmt, clippy
+`-D warnings`, `cargo test --locked`, C smoke with ASan/UBSan, `dart analyze
+--fatal-infos`, `dart test --concurrency=1`) and `scripts/check-bindings.sh`.
+`CARGO`, `DART`, `CC`, `MQTT_TEST_PYTHON`, `FLUTTER_ROOT`, `LIBCLANG_ROOT`, and
+`C_INCLUDE_DIR` can override locations. `C_INCLUDE_DIR` defaults to
+`cc -print-file-name=include` when unset.
 
-For binding regeneration install libclang and run `scripts/generate-bindings.sh`;
-optional `LIBCLANG_ROOT` and `C_INCLUDE_DIR` override LLVM/standard header locations.
-Generated C and Dart bindings are included deliberately; build outputs and raw
-machine-specific test logs are not part of the public source distribution.
+The fixture starts and stops an independent temporary aMQTT broker on 127.0.0.1
+with an ephemeral port. TLS and mTLS tests generate temporary certificates in a
+temp directory via `scripts/gen_test_certs.py`. No real password, private key,
+public broker, or external account is stored in the repository. Build outputs
+and machine-specific logs are not part of this source snapshot.
 
-## Recorded host result
+## Recorded Linux result
 
-2026-11-17 (Asia/Shanghai), Linux x86_64, Rust 1.100.0 and Dart 3.14.0:
+Linux x86_64, 2026-11-21 (Asia/Shanghai), Rust 1.100.0, Dart 3.14.0, Flutter
+3.50.1, Python 3.13, amqtt 0.12.2, rumqttc 0.25.1:
 
-- `cargo fmt --all -- --check`: passed.
-- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
-- `cargo test --workspace --locked`: 13 tests passed.
-- `cargo build -p mqtt-c --locked`: passed on Linux.
-- C11 smoke executable with ASan/UBSan: passed against real aMQTT.
-- `dart analyze --fatal-infos`: no issues.
-- `dart test --concurrency=1`: 8 tests passed, including real Dart/C/Rust/broker
-  messaging, three Dart isolates, listener-triggered close, late PUBACK and
-  bounded pause/backpressure overflow.
-- C/Dart binding regeneration reproduced identical content.
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
+| `cargo test --workspace --locked` | 76 passed / 0 failed / 0 ignored |
+| C11 executable with ASan/UBSan and aMQTT | PASS (1 fixture) |
+| `dart analyze --fatal-infos` | no issues |
+| `dart test --concurrency=1` | 76 passed / 0 failed |
+| `scripts/check-bindings.sh` | header and Dart bindings hash-identical after regeneration |
+| `scripts/ci-host.sh` / `scripts/test-host.sh` | exit 0 |
 
-Wire-level tests also check CONNACK/SUBACK gating, keepalive=0 on CONNECT,
-absence of default protocol PING over an observation window, explicit 1-second
-PING, QoS1 PUBACK gating, bounded requests and fatal overflow wakeup.
+Host TLS coverage includes a custom CA or host system roots (a custom CA
+replaces system roots), hostname and expiry checks, untrusted-CA and
+TLS-to-plaintext failures that are not retried, and rejection of empty or
+invalid CA PEM without falling back to plaintext. Host mTLS coverage includes
+an in-memory client certificate/key pair, missing or untrusted client
+certificates (`Tls` 14, once), unparsable PEM (`InvalidClientCertificate` 20),
+and a non-matching pair (`CertificateKeyMismatch` 21). Credential tests cover
+passwords on TLS, the explicit `allowPlaintextCredentials` switch on plaintext
+TCP (`PlaintextCredentials` 18), and `BadCredentials` 19 without retry. MQTT
+3.1.1 Last Will (topic, payload, QoS 0/1, retain) is covered; QoS 2 Will is
+`Unsupported`. Passwords, certificates, and private keys are redacted from
+Debug, Dart `toString`, errors, and events. These are Linux-host results, not
+mobile trust-store results.
 
-These are recorded local results, not a claim that remote CI has run. C executable
-sanitizers do not mean Rust dependencies were sanitizer-instrumented or that
-arbitrary invalid C pointers can be made safe.
+Existing ownership, close/poll, late ACK, keepalive-zero, QoS 1 redelivery, and
+backpressure coverage remains. Local once-only settlement is not MQTT
+exactly-once delivery. C sanitizer flags instrument the C executable, not the
+full Rust dependency tree.
 
-## Not run / not implemented
+## Continuous integration — not yet observed on GitHub
 
-No TLS/mTLS certificate or hostname-validation test, successful MQTT5 engine,
-WS/WSS, automatic reconnect/session recovery, graceful close drain, fuzz/Miri/TSan,
-Android/iOS cross-build, Flutter packaging, simulator, physical device, signing,
-background-execution, remote CI or independent production security review is
-claimed. See `device-smoke.md` and `semantics.md` before using the API.
+`.github/workflows/host-tests.yml` is the Linux host job on `ubuntu-24.04`. It
+installs the pinned tools above, with no repository secrets, then runs the same
+steps as `scripts/ci-host.sh`. A local pass is not a GitHub Actions result. No
+workflow badge is published until the job has actually run green on GitHub.
+There is no macOS host-tests job: the C smoke test and Dart native library path
+in `scripts/test-host.sh` are Linux `.so` / rpath specific.
+
+A separate `.github/workflows/ios-buildable.yml` job is documented in
+[device-smoke.md](device-smoke.md) and is also pending a real macOS/CI run.
+
+## Not verified
+
+No whole-Rust ASan, TSan, Miri, fuzzing, or second-broker Mosquitto result is
+claimed. No successful MQTT 5 engine, WS/WSS, automatic reconnect, durable
+recovery, or draining close is claimed. Android `arm64-v8a` has local
+cross-build / debug-APK evidence only; iOS `arm64` project files are prepared
+but not built on Linux. No emulator, simulator, or physical-device TLS result
+exists. See [mobile gates](device-smoke.md) and [ownership](ownership.md).
+
+## Build portability regression checks
+
+`scripts/test-host.sh` also runs `scripts/test_build_support.py`. Its certificate
+check verifies the generated leaf signature, server/client usage, loopback SAN,
+and the fixed 2020 expiry interval. Dated issuance uses `openssl ca` so OpenSSL
+3.0 (Ubuntu 24.04) and newer releases exercise the same expired-certificate test;
+no TLS validation or failure assertion is bypassed.
+
+The iOS orchestration regression uses fake tools on Linux, plus a real host
+Cargo staticlib-selection probe. Neither is an iOS compile or link result.
+`build-libs.sh ios-arm64` now selects only `staticlib` and explicitly exports
+`IPHONEOS_DEPLOYMENT_TARGET=15.0` for Rust and native dependency compilers,
+matching the existing podspec and example minimum (not raising it). The actual
+iOS library/app must still build on macOS/CI; local Linux checks are not proof
+of GitHub or iOS success.
