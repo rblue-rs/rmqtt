@@ -9,10 +9,11 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 
 
-def run(cmd: list[str]) -> None:
-    subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+def run(cmd: list[str], cwd: str | None = None) -> None:
+    subprocess.check_call(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
 def write_ext(path: str, body: str) -> None:
@@ -65,10 +66,27 @@ def issue(
         ext,
     ]
     if not_before and not_after:
-        cmd.extend(["-not_before", not_before, "-not_after", not_after])
+        # x509 -not_before/-not_after are not available in OpenSSL 3.0
+        # (Ubuntu 24.04). The CA command supports explicit dates there too.
+        # Its serial/index files stay in an isolated temporary directory.
+        with tempfile.TemporaryDirectory(prefix="issuer-", dir=out) as state:
+            write_ext(os.path.join(state, "index"), "")
+            write_ext(os.path.join(state, "serial"), "01\n")
+            write_ext(
+                os.path.join(state, "ca.cnf"),
+                "[ca]\ndefault_ca=fixture\n"
+                "[fixture]\ndatabase=index\nserial=serial\nnew_certs_dir=.\n"
+                "default_md=sha256\npolicy=subject_policy\n"
+                "[subject_policy]\ncommonName=supplied\n",
+            )
+            run([
+                "openssl", "ca", "-batch", "-notext", "-config", "ca.cnf",
+                "-cert", ca_pem, "-keyfile", ca_key, "-in", csr, "-out", pem,
+                "-extfile", ext, "-startdate", not_before, "-enddate", not_after,
+            ], cwd=state)
     else:
         cmd.extend(["-days", "365"])
-    run(cmd)
+        run(cmd)
     os.remove(csr)
 
 

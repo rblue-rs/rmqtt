@@ -93,14 +93,19 @@ build_ios_arm64() {
     echo "error: Xcode iPhoneOS SDK not available" >&2
     exit 1
   fi
+  # Match the existing podspec and example floor, rather than letting Rust
+  # default to iOS 10 while cc/crypto objects default to the SDK version.
+  # This is not a new minimum; the plugin already requires iOS 15.0.
+  export IPHONEOS_DEPLOYMENT_TARGET=15.0
   rustup target add aarch64-apple-ios
   echo "== ios-arm64 (aarch64-apple-ios, panic=abort) =="
   rustc --version
   xcrun --sdk iphoneos --show-sdk-version
-  # Request a static library for DynamicLibrary.process() on iOS.
-  "$CARGO" build -p mqtt-c --locked --release --target aarch64-apple-ios \
-    "${CARGO_RELEASE_ABORT[@]}" \
-    --config 'lib.crate-type=["staticlib"]'
+  echo "IPHONEOS_DEPLOYMENT_TARGET=$IPHONEOS_DEPLOYMENT_TARGET"
+  # Cargo config does not override [lib].crate-type in Cargo.toml.
+  # Select only staticlib explicitly: do not also link an unused cdylib.
+  "$CARGO" rustc -p mqtt-c --lib --locked --release --target aarch64-apple-ios \
+    "${CARGO_RELEASE_ABORT[@]}" --crate-type staticlib
   out="$ROOT/target/aarch64-apple-ios/release/libmqtt_c.a"
   dest="$ROOT/examples/flutter/mqtt_flutter/ios/Frameworks"
   mkdir -p "$dest"

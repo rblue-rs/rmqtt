@@ -85,3 +85,13 @@ Target ABI, SDK/NDK or Xcode version, device model and OS, signing method,
 broker, CA trust and hostname checks, foreground/background transitions,
 network loss, and close behavior. Simulator or emulator success is not that
 record.
+
+## iOS compiler configuration
+
+The library build exports `IPHONEOS_DEPLOYMENT_TARGET=15.0`, matching the
+existing podspec/example floor, and uses `cargo rustc --lib --crate-type
+staticlib` rather than an ineffective Cargo config override. Rust and native
+crypto/glue objects must share that deployment floor. This does not raise the
+supported minimum or establish an iOS build result: macOS/CI compile and final
+app linking are still required. Linux orchestration tests are not Apple SDK
+verification.

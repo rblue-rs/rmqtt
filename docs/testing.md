@@ -84,3 +84,19 @@ recovery, or draining close is claimed. Android `arm64-v8a` has local
 cross-build / debug-APK evidence only; iOS `arm64` project files are prepared
 but not built on Linux. No emulator, simulator, or physical-device TLS result
 exists. See [mobile gates](device-smoke.md) and [ownership](ownership.md).
+
+## Build portability regression checks
+
+`scripts/test-host.sh` also runs `scripts/test_build_support.py`. Its certificate
+check verifies the generated leaf signature, server/client usage, loopback SAN,
+and the fixed 2020 expiry interval. Dated issuance uses `openssl ca` so OpenSSL
+3.0 (Ubuntu 24.04) and newer releases exercise the same expired-certificate test;
+no TLS validation or failure assertion is bypassed.
+
+The iOS orchestration regression uses fake tools on Linux, plus a real host
+Cargo staticlib-selection probe. Neither is an iOS compile or link result.
+`build-libs.sh ios-arm64` now selects only `staticlib` and explicitly exports
+`IPHONEOS_DEPLOYMENT_TARGET=15.0` for Rust and native dependency compilers,
+matching the existing podspec and example minimum (not raising it). The actual
+iOS library/app must still build on macOS/CI; local Linux checks are not proof
+of GitHub or iOS success.
