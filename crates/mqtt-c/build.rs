@@ -8,13 +8,15 @@ fn main() {
     println!("cargo:rerun-if-changed=src/ownership.rs");
     println!("cargo:rerun-if-changed=src/dart_bridge.c");
     println!("cargo:rerun-if-changed=third_party/dart");
-    let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../..");
+    let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let output = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    println!("cargo:rerun-if-changed=cbindgen.toml");
     println!("cargo:rerun-if-changed=src/lib.rs");
-    let config = cbindgen::Config::from_file(root.join("bindings/c/cbindgen.toml")).unwrap();
+    let config = cbindgen::Config::from_file(manifest.join("cbindgen.toml")).unwrap();
     cbindgen::Builder::new()
         .with_crate(std::env::var("CARGO_MANIFEST_DIR").unwrap())
         .with_config(config)
         .generate()
         .expect("generate C header")
-        .write_to_file(root.join("bindings/c/include/mqtt_client.h"));
+        .write_to_file(output.join("mqtt_client.h"));
 }

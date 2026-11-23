@@ -50,8 +50,11 @@ final class NativeClient implements Finalizable {
       this.ffi, this.handle, this.event, this.topic, this.payload, this.token);
   factory NativeClient.create(MqttBindings ffi, void Function(int) check,
       int owner, String server, String clientId, int port) {
+    // Defend this internal allocation boundary independently of the facade.
+    if (server.length > 65535 || clientId.length > 65535) check(1);
+    final host = utf8.encode(server), id = utf8.encode(clientId);
+    if (host.length > 65535 || id.length > 65535) check(1);
     final handle = using((a) {
-      final host = utf8.encode(server), id = utf8.encode(clientId);
       final hp = a<Uint8>(host.length),
           ip = a<Uint8>(id.length),
           out = a<Uint64>();

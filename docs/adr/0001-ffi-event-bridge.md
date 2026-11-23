@@ -79,3 +79,10 @@ Default keepAlivePeriod is0. MQTT5 is typed Unsupported, never silently rewritte
 to a different keepalive. No automatic reconnect, durable outbox, cross-process
 QoS recovery, TLS or mobile validation is implied. See [semantics](../semantics.md)
 and [testing](../testing.md) for current behavior and validation limits.
+
+
+### Additive bounded drain
+
+The original force-close/owner-exit release order remains unchanged. A separate
+explicit [bounded drain](../drain-close.md) now retains control completions until
+polling, then uses that same release path. It adds no callbacks or Dart handshake.

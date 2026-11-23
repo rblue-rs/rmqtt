@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:mqtt_flutter/mqtt_flutter.dart';
+import 'package:rmqtt_flutter/rmqtt_flutter.dart';
 import 'package:test/test.dart';
 
 const _user = 'dart-test-user';

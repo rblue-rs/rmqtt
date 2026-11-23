@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Build scripts emit headers in OUT_DIR; only this explicit developer command exports.
+metadata="$(mktemp)"
+"${CARGO:-cargo}" build -p mqtt-c --locked --message-format=json > "$metadata"
+python3 - "$metadata" "$ROOT/bindings/c/include/mqtt_client.h" <<'PY_HEADER'
+import json
+from pathlib import Path
+import shutil
+import sys
+headers = []
+for line in Path(sys.argv[1]).read_text().splitlines():
+    item = json.loads(line)
+    if item.get('reason') == 'build-script-executed':
+        path = Path(item['out_dir']) / 'mqtt_client.h'
+        if path.is_file():
+            headers.append(path)
+if len(headers) != 1:
+    raise SystemExit('Expected one generated mqtt_client.h, got ' + str(headers))
+shutil.copyfile(headers[0], sys.argv[2])
+PY_HEADER
+rm -f "$metadata"
+python3 "$ROOT/scripts/sync-native.py"
 cd "$ROOT/examples/flutter/mqtt_flutter"
 # System LLVM installs work with ffigen.yaml directly. This override is optional.
 if [[ -z "${C_INCLUDE_DIR:-}" ]]; then

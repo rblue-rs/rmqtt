@@ -1,0 +1,10 @@
+[package]
+name = "mqtt-api"
+description = "Unpublished option, status and event types for the experimental Rust MQTT client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+repository = "https://github.com/rblue-rs/rmqtt"
+readme = "README.md"
+[dependencies]

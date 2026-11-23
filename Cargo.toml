@@ -7,7 +7,7 @@ edition = "2021"
 license = "Apache-2.0"
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "macros", "io-util"] }
-rumqttc = { version = "=0.25.1", default-features = false, features = ["use-rustls"] }
+rumqttc = { version = "=0.25.1", default-features = false, features = ["use-rustls", "websocket"] }
 mqtt-api = { path = "crates/mqtt-api" }
 mqtt-runtime = { path = "crates/mqtt-runtime" }
 mqtt-core = { path = "crates/mqtt-core" }

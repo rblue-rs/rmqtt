@@ -75,6 +75,33 @@ class MqttBindings {
       int Function(ffi.Pointer<ffi.Uint8>, int, ffi.Pointer<ffi.Uint8>, int,
           int, ffi.Pointer<ffi.Uint64>)>();
 
+  /// Configure WebSocket for subsequent connect calls on this handle only.
+  /// Does not mutate an existing connection. use_tls on connect selects WSS.
+  /// enabled=0 resets to TCP/TLS and requires null+0 path; enabled=1 with
+  /// null+0 selects /mqtt. Otherwise path is copied and validated (max2048 bytes).
+  /// # Safety
+  /// A non-null path must reference path_len readable bytes.
+  int mqtt_client_set_websocket(
+    int handle,
+    int enabled,
+    ffi.Pointer<ffi.Uint8> path,
+    int path_len,
+  ) {
+    return _mqtt_client_set_websocket(
+      handle,
+      enabled,
+      path,
+      path_len,
+    );
+  }
+
+  late final _mqtt_client_set_websocketPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Int32 Function(ffi.Uint64, ffi.Uint8, ffi.Pointer<ffi.Uint8>,
+              ffi.Size)>>('mqtt_client_set_websocket');
+  late final _mqtt_client_set_websocket = _mqtt_client_set_websocketPtr
+      .asFunction<int Function(int, int, ffi.Pointer<ffi.Uint8>, int)>();
+
   /// # Safety
   /// `ca_pem` must reference `ca_pem_len` readable bytes when non-null.
   /// A null pointer is allowed only when `ca_pem_len` is zero, which means no
@@ -187,6 +214,121 @@ class MqttBindings {
           ffi.Pointer<ffi.Uint8>,
           int)>();
 
+  /// Additive connect: MQTT 3.1.1 `clean_session` (0 or 1) and an optional reconnect policy.
+  /// A null `reconnect` pointer uses the default disabled policy. Existing
+  /// `mqtt_client_connect` remains clean_session=1 with reconnect off.
+  ///
+  /// # Safety
+  /// Same pointer rules as `mqtt_client_connect`. `reconnect` may be null; a
+  /// non-null pointer must be aligned and readable for `MqttReconnectPolicy`.
+  int mqtt_client_connect_ex(
+    int handle,
+    int op,
+    int protocol,
+    int keep_alive_seconds,
+    int use_tls,
+    ffi.Pointer<ffi.Uint8> ca_pem,
+    int ca_pem_len,
+    ffi.Pointer<ffi.Uint8> username,
+    int username_len,
+    ffi.Pointer<ffi.Uint8> password,
+    int password_len,
+    int allow_plaintext_credentials,
+    ffi.Pointer<ffi.Uint8> will_topic,
+    int will_topic_len,
+    ffi.Pointer<ffi.Uint8> will_payload,
+    int will_payload_len,
+    int will_qos,
+    int will_retain,
+    ffi.Pointer<ffi.Uint8> client_cert_pem,
+    int client_cert_pem_len,
+    ffi.Pointer<ffi.Uint8> client_key_pem,
+    int client_key_pem_len,
+    int clean_session,
+    ffi.Pointer<MqttReconnectPolicy> reconnect,
+  ) {
+    return _mqtt_client_connect_ex(
+      handle,
+      op,
+      protocol,
+      keep_alive_seconds,
+      use_tls,
+      ca_pem,
+      ca_pem_len,
+      username,
+      username_len,
+      password,
+      password_len,
+      allow_plaintext_credentials,
+      will_topic,
+      will_topic_len,
+      will_payload,
+      will_payload_len,
+      will_qos,
+      will_retain,
+      client_cert_pem,
+      client_cert_pem_len,
+      client_key_pem,
+      client_key_pem_len,
+      clean_session,
+      reconnect,
+    );
+  }
+
+  late final _mqtt_client_connect_exPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Int32 Function(
+              ffi.Uint64,
+              ffi.Uint64,
+              ffi.Uint8,
+              ffi.Uint16,
+              ffi.Uint8,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Uint8,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Uint8,
+              ffi.Uint8,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Pointer<ffi.Uint8>,
+              ffi.Size,
+              ffi.Uint8,
+              ffi.Pointer<MqttReconnectPolicy>)>>('mqtt_client_connect_ex');
+  late final _mqtt_client_connect_ex = _mqtt_client_connect_exPtr.asFunction<
+      int Function(
+          int,
+          int,
+          int,
+          int,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          int,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          int,
+          ffi.Pointer<MqttReconnectPolicy>)>();
+
   /// # Safety
   /// topic must reference topic_len readable bytes.
   int mqtt_client_subscribe(
@@ -289,6 +431,49 @@ class MqttBindings {
           'mqtt_client_disconnect');
   late final _mqtt_client_disconnect =
       _mqtt_client_disconnectPtr.asFunction<int Function(int, int)>();
+
+  /// Begin optional graceful close without blocking. timeout_ms must be 1..300000.
+  /// First accepted deadline wins; repeats join the same irreversible attempt.
+  /// New operations return Closed after acceptance; connecting/disconnecting -> Busy.
+  /// Poll retained control completions, not inbound messages. QoS1 waits for PUBACK;
+  /// success is not subscriber delivery. Caller must still close/free the handle.
+  int mqtt_client_drain_begin(
+    int handle,
+    int timeout_ms,
+  ) {
+    return _mqtt_client_drain_begin(
+      handle,
+      timeout_ms,
+    );
+  }
+
+  late final _mqtt_client_drain_beginPtr =
+      _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Uint64, ffi.Uint32)>>(
+          'mqtt_client_drain_begin');
+  late final _mqtt_client_drain_begin =
+      _mqtt_client_drain_beginPtr.asFunction<int Function(int, int)>();
+
+  /// Nonblocking out-of-band drain result, available even after force close until
+  /// free. 0 not-started, 1 pending, 2 drained, 3 timed-out, 4 failed, 5 forced.
+  /// Drained includes engine Outgoing Disconnect, not proof of broker receipt.
+  /// # Safety
+  /// out_status must point to aligned writable u32. Errors leave it unchanged.
+  int mqtt_client_drain_status(
+    int handle,
+    ffi.Pointer<ffi.Uint32> out_status,
+  ) {
+    return _mqtt_client_drain_status(
+      handle,
+      out_status,
+    );
+  }
+
+  late final _mqtt_client_drain_statusPtr = _lookup<
+      ffi.NativeFunction<
+          ffi.Int32 Function(ffi.Uint64,
+              ffi.Pointer<ffi.Uint32>)>>('mqtt_client_drain_status');
+  late final _mqtt_client_drain_status = _mqtt_client_drain_statusPtr
+      .asFunction<int Function(int, ffi.Pointer<ffi.Uint32>)>();
 
   /// Poll without blocking. BUFFER_TOO_SMALL (9) writes metadata but retains event.
   /// EMPTY (10) does not change caller memory. Native never retains caller pointers.
@@ -520,6 +705,22 @@ class _SymbolAddresses {
       get mqtt_dart_owner_finalize => _library._mqtt_dart_owner_finalizePtr;
   ffi.Pointer<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>
       get mqtt_dart_client_finalize => _library._mqtt_dart_client_finalizePtr;
+}
+
+/// Additive reconnect policy for `mqtt_client_connect_ex`. `enabled` must be 0 or 1.
+/// A null policy pointer means disabled (the default).
+final class MqttReconnectPolicy extends ffi.Struct {
+  @ffi.Uint8()
+  external int enabled;
+
+  @ffi.Uint32()
+  external int max_attempts;
+
+  @ffi.Uint32()
+  external int base_delay_ms;
+
+  @ffi.Uint32()
+  external int max_delay_ms;
 }
 
 /// Event metadata. Buffers are copied into caller memory by mqtt_client_poll.

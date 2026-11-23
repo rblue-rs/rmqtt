@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:mqtt_flutter/mqtt_flutter.dart';
+import 'package:rmqtt_flutter/rmqtt_flutter.dart';
 import 'package:test/test.dart';
 
 String repoRoot() {

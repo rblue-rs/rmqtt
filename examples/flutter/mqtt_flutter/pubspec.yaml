@@ -1,7 +1,9 @@
-name: mqtt_flutter
+name: rmqtt_flutter
 version: 0.1.0
 publish_to: none
-description: Experimental Rust MQTT FFI slice packaged as a Flutter FFI plugin skeleton (not a published plugin).
+description: Experimental Flutter FFI MQTT client with bundled Rust source, verified TLS and bounded asynchronous operation APIs.
+repository: https://github.com/rblue-rs/rmqtt
+homepage: https://github.com/rblue-rs/rmqtt
 environment:
   sdk: '>=3.4.0 <4.0.0'
   flutter: '>=3.50.0'

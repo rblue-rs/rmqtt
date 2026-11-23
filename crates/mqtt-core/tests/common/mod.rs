@@ -149,3 +149,98 @@ impl Drop for TestBroker {
         let _ = std::fs::remove_file(&self.ready);
     }
 }
+
+#[allow(dead_code)]
+pub fn try_next(c: &Client, window: Duration) -> Option<mqtt_core::Event> {
+    let end = Instant::now() + window;
+    loop {
+        match c.pop() {
+            Ok(e) => return Some(e),
+            Err(Error::Empty) => {
+                if Instant::now() >= end {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            e => panic!("{e:?}"),
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn try_packet(s: &mut impl Read) -> std::io::Result<Vec<u8>> {
+    let mut b = [0];
+    s.read_exact(&mut b)?;
+    let h = b[0];
+    let mut len = 0;
+    let mut shift = 0;
+    loop {
+        s.read_exact(&mut b)?;
+        len += (b[0] as usize & 127) << shift;
+        if b[0] & 128 == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    let mut v = vec![0; len];
+    s.read_exact(&mut v)?;
+    let mut out = vec![h];
+    out.extend(v);
+    Ok(out)
+}
+
+#[allow(dead_code)]
+pub fn connect_clean_session(packet: &[u8]) -> bool {
+    assert_eq!(packet[0], 0x10, "expected CONNECT");
+    packet[8] & 0x02 != 0
+}
+
+#[allow(dead_code)]
+pub fn packet_id(packet: &[u8]) -> u16 {
+    u16::from_be_bytes([packet[1], packet[2]])
+}
+
+#[allow(dead_code)]
+pub fn subscribe_filters(packet: &[u8]) -> Vec<(String, u8)> {
+    assert_eq!(packet[0] & 0xf0, 0x80, "expected SUBSCRIBE");
+    let mut i = 3;
+    let mut out = Vec::new();
+    while i + 2 <= packet.len() {
+        let len = u16::from_be_bytes([packet[i], packet[i + 1]]) as usize;
+        i += 2;
+        let topic = String::from_utf8(packet[i..i + len].to_vec()).unwrap();
+        i += len;
+        let qos = packet[i];
+        i += 1;
+        out.push((topic, qos));
+    }
+    out
+}
+
+#[allow(dead_code)]
+pub fn write_connack(s: &mut impl std::io::Write, session_present: bool, code: u8) {
+    s.write_all(&[0x20, 2, u8::from(session_present), code])
+        .unwrap();
+}
+
+#[allow(dead_code)]
+pub fn write_suback(s: &mut impl std::io::Write, id: u16, codes: &[u8]) {
+    let mut out = vec![0x90, (2 + codes.len()) as u8];
+    out.extend(id.to_be_bytes());
+    out.extend(codes);
+    s.write_all(&out).unwrap();
+}
+
+#[allow(dead_code)]
+pub fn write_unsuback(s: &mut impl std::io::Write, id: u16) {
+    let mut out = vec![0xb0, 2];
+    out.extend(id.to_be_bytes());
+    s.write_all(&out).unwrap();
+}
+
+#[allow(dead_code)]
+pub fn write_puback(s: &mut impl std::io::Write, id: u16) {
+    let mut out = vec![0x40, 2];
+    out.extend(id.to_be_bytes());
+    s.write_all(&out).unwrap();
+}

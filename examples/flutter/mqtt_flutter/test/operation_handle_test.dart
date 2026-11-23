@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:mqtt_flutter/mqtt_flutter.dart';
+import 'package:rmqtt_flutter/rmqtt_flutter.dart';
 import 'package:test/test.dart';
 import 'ack_timeout_test.dart' show Wire;
 import 'lifecycle_test.dart' show Peer;

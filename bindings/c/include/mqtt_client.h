@@ -15,6 +15,17 @@
 typedef struct _Dart_Handle _Dart_Handle;
 
 /**
+ * Additive reconnect policy for `mqtt_client_connect_ex`. `enabled` must be 0 or 1.
+ * A null policy pointer means disabled (the default).
+ */
+typedef struct MqttReconnectPolicy {
+  uint8_t enabled;
+  uint32_t max_attempts;
+  uint32_t base_delay_ms;
+  uint32_t max_delay_ms;
+} MqttReconnectPolicy;
+
+/**
  * Event metadata. Buffers are copied into caller memory by mqtt_client_poll.
  */
 typedef struct MqttEvent {
@@ -60,6 +71,19 @@ int32_t mqtt_client_new(const uint8_t *host,
                         uint64_t *out);
 
 /**
+ * Configure WebSocket for subsequent connect calls on this handle only.
+ * Does not mutate an existing connection. use_tls on connect selects WSS.
+ * enabled=0 resets to TCP/TLS and requires null+0 path; enabled=1 with
+ * null+0 selects /mqtt. Otherwise path is copied and validated (max2048 bytes).
+ * # Safety
+ * A non-null path must reference path_len readable bytes.
+ */
+int32_t mqtt_client_set_websocket(uint64_t handle,
+                                  uint8_t enabled,
+                                  const uint8_t *path,
+                                  size_t path_len);
+
+/**
  * # Safety
  * `ca_pem` must reference `ca_pem_len` readable bytes when non-null.
  * A null pointer is allowed only when `ca_pem_len` is zero, which means no
@@ -97,6 +121,40 @@ int32_t mqtt_client_connect(uint64_t handle,
                             size_t client_key_pem_len);
 
 /**
+ * Additive connect: MQTT 3.1.1 `clean_session` (0 or 1) and an optional reconnect policy.
+ * A null `reconnect` pointer uses the default disabled policy. Existing
+ * `mqtt_client_connect` remains clean_session=1 with reconnect off.
+ *
+ * # Safety
+ * Same pointer rules as `mqtt_client_connect`. `reconnect` may be null; a
+ * non-null pointer must be aligned and readable for `MqttReconnectPolicy`.
+ */
+int32_t mqtt_client_connect_ex(uint64_t handle,
+                               uint64_t op,
+                               uint8_t protocol,
+                               uint16_t keep_alive_seconds,
+                               uint8_t use_tls,
+                               const uint8_t *ca_pem,
+                               size_t ca_pem_len,
+                               const uint8_t *username,
+                               size_t username_len,
+                               const uint8_t *password,
+                               size_t password_len,
+                               uint8_t allow_plaintext_credentials,
+                               const uint8_t *will_topic,
+                               size_t will_topic_len,
+                               const uint8_t *will_payload,
+                               size_t will_payload_len,
+                               uint8_t will_qos,
+                               uint8_t will_retain,
+                               const uint8_t *client_cert_pem,
+                               size_t client_cert_pem_len,
+                               const uint8_t *client_key_pem,
+                               size_t client_key_pem_len,
+                               uint8_t clean_session,
+                               const struct MqttReconnectPolicy *reconnect);
+
+/**
  * # Safety
  * topic must reference topic_len readable bytes.
  */
@@ -129,6 +187,24 @@ int32_t mqtt_client_unsubscribe(uint64_t handle,
                                 size_t topic_len);
 
 int32_t mqtt_client_disconnect(uint64_t handle, uint64_t op);
+
+/**
+ * Begin optional graceful close without blocking. timeout_ms must be 1..300000.
+ * First accepted deadline wins; repeats join the same irreversible attempt.
+ * New operations return Closed after acceptance; connecting/disconnecting -> Busy.
+ * Poll retained control completions, not inbound messages. QoS1 waits for PUBACK;
+ * success is not subscriber delivery. Caller must still close/free the handle.
+ */
+int32_t mqtt_client_drain_begin(uint64_t handle, uint32_t timeout_ms);
+
+/**
+ * Nonblocking out-of-band drain result, available even after force close until
+ * free. 0 not-started, 1 pending, 2 drained, 3 timed-out, 4 failed, 5 forced.
+ * Drained includes engine Outgoing Disconnect, not proof of broker receipt.
+ * # Safety
+ * out_status must point to aligned writable u32. Errors leave it unchanged.
+ */
+int32_t mqtt_client_drain_status(uint64_t handle, uint32_t *out_status);
 
 /**
  * Poll without blocking. BUFFER_TOO_SMALL (9) writes metadata but retains event.
