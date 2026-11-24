@@ -7,6 +7,7 @@ DART="${DART:-dart}"
 PYTHON="${MQTT_TEST_PYTHON:-python3}"
 export MQTT_TEST_PYTHON="$PYTHON"
 "$PYTHON" scripts/test_build_support.py
+"$PYTHON" scripts/test_packaging.py
 "$CARGO" fmt --all -- --check
 "$CARGO" clippy --workspace --all-targets -- -D warnings
 "$CARGO" test --workspace --locked

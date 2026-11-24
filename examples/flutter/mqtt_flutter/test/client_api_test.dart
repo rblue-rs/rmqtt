@@ -3,7 +3,7 @@ import 'dart:io';
 import 'dart:async';
 import 'dart:isolate';
 import 'dart:typed_data';
-import 'package:mqtt_flutter/mqtt_flutter.dart';
+import 'package:rmqtt_flutter/rmqtt_flutter.dart';
 import 'package:test/test.dart';
 
 void main() {
@@ -13,6 +13,8 @@ void main() {
     expect(const MqttConnectOptions().caPem, isNull);
     expect(const MqttConnectOptions().clientCertPem, isNull);
     expect(const MqttConnectOptions().clientKeyPem, isNull);
+    expect(const MqttConnectOptions().cleanSession, isTrue);
+    expect(const MqttConnectOptions().reconnectPolicy.enabled, isFalse);
   });
   test('Dart -> C ABI -> Rust -> broker and reusable disconnect', () async {
     final c = MqttClient(

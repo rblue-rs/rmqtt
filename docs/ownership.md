@@ -2,6 +2,8 @@
 
 Experimental Linux-host behavior only. The public Dart API remains unchanged.
 Explicit close is the primary deterministic path; force close is not drain.
+Optional [drainClose](drain-close.md) is a separate bounded explicit operation;
+owner exit/finalizers never use it.
 
 ## Ownership
 
@@ -70,6 +72,15 @@ network packet withdrawal, broker receipt or graceful drainage is guaranteed.
 A running poll timer can keep an isolate alive. Merely returning while keeping a
 live MQTT connection is not equivalent to the VM actually terminating its owner.
 
+Host exit-cleanup probes observe this pairing first: after the owner isolate has
+exited, they retry `mqtt_client_new` until it returns `NotInitialized` (2), or
+until a two-second native-dispatch window elapses. A temporary handle created
+while the runtime is still up is closed and freed immediately. Only then do the
+probes check that `mqtt_runtime_shutdown` is already idempotent. They must not
+call shutdown first, because that would consume a single leftover owner init
+ref and still look green. Public close remains force-close; this is not a drain
+API.
+
 ## Backpressure and limits
 
 | Condition | Behavior |
@@ -100,7 +111,7 @@ still count, then races poll, release and both fallback callbacks. The controlle
 pause test retains SUBACK and Queued/Sent/PUBACK, then124 messages, then Overflow:
 128 normal slots total. Another test still preserves all128 message-only events.
 
-See [testing](testing.md) for recorded totals and Linux RSS observations. Local once-only settlement is not MQTT exactly-once delivery. Host TLS/mTLS is documented separately; no auto reconnect, persistence, or physical-device validation is implied.
+See [testing](testing.md) for recorded totals and Linux RSS observations. Local once-only settlement is not MQTT exactly-once delivery. Host TLS/mTLS is documented separately; auto reconnect is off by default and is not persistence or physical-device validation.
 
 ## Official basis
 

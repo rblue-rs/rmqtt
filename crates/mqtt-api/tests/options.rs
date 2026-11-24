@@ -392,3 +392,70 @@ fn clear_secrets_drops_client_key_material() {
     assert!(!text.contains("SECRET-CLIENT-KEY"));
     assert!(!text.contains("unit-identity-secret"));
 }
+
+#[test]
+fn default_clean_session_is_true_and_reconnect_is_off() {
+    let o = Options::new("localhost", "test", 1883);
+    assert!(o.clean_session);
+    assert!(!o.reconnect.enabled);
+    assert_eq!(o.reconnect.max_attempts, 8);
+    assert_eq!(o.reconnect.base_delay, Duration::from_secs(1));
+    assert_eq!(o.reconnect.max_delay, Duration::from_secs(30));
+    assert_eq!(o.validate(), Ok(()));
+    let text = format!("{o:?}");
+    assert!(text.contains("clean_session"));
+    assert!(text.contains("reconnect"));
+    assert!(!text.contains("SECRET"));
+}
+
+#[test]
+fn enabled_reconnect_policy_requires_a_finite_ceiling() {
+    let mut o = Options::new("localhost", "test", 1883);
+    o.reconnect.enabled = true;
+    o.reconnect.max_attempts = 0;
+    assert_eq!(o.validate(), Err(Error::InvalidArgument));
+    o.reconnect.max_attempts = 3;
+    o.reconnect.base_delay = Duration::from_micros(500);
+    assert_eq!(o.validate(), Err(Error::InvalidArgument));
+    o.reconnect.base_delay = Duration::from_millis(20);
+    o.reconnect.max_delay = Duration::from_millis(10);
+    assert_eq!(o.validate(), Err(Error::InvalidArgument));
+    o.reconnect.max_delay = Duration::from_millis(20);
+    assert_eq!(o.validate(), Ok(()));
+}
+
+#[test]
+fn disabled_reconnect_policy_does_not_require_delay_fields() {
+    let mut o = Options::new("localhost", "test", 1883);
+    o.reconnect.enabled = false;
+    o.reconnect.max_attempts = 0;
+    o.reconnect.base_delay = Duration::ZERO;
+    o.reconnect.max_delay = Duration::ZERO;
+    assert_eq!(o.validate(), Ok(()));
+}
+
+#[test]
+fn unbounded_raw_host_metadata_is_rejected() {
+    let o = mqtt_api::Options::new("h".repeat(65536), "bounded", 1883);
+    assert_eq!(o.validate(), Err(mqtt_api::Error::InvalidArgument));
+}
+
+#[test]
+fn will_binary_u16_boundary_rejected_before_engine() {
+    for protocol in [4, 5] {
+        let mut o = Options::new("localhost", "will-bound", 1883);
+        o.protocol = protocol;
+        if protocol == 5 {
+            o.keep_alive = Duration::from_secs(5);
+        }
+        o.will = Some(mqtt_api::Will {
+            topic: "dummy".into(),
+            payload: vec![0; 65535],
+            qos: 0,
+            retain: false,
+        });
+        assert_eq!(o.validate(), Ok(()));
+        o.will.as_mut().unwrap().payload.push(0);
+        assert_eq!(o.validate(), Err(Error::InvalidArgument));
+    }
+}

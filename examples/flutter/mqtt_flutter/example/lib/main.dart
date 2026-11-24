@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:mqtt_flutter/mqtt_flutter.dart';
+import 'package:rmqtt_flutter/rmqtt_flutter.dart';
 
 void main() {
   runApp(const MqttSkeletonApp());

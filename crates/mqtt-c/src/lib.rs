@@ -1,7 +1,7 @@
 //! Experimental polling C ABI. Caller-owned buffers; no cross-thread callbacks.
 mod ownership;
 
-use mqtt_api::{Error, Options};
+use mqtt_api::{Error, Options, ReconnectPolicy};
 use mqtt_core::Client;
 use std::{
     collections::HashMap,
@@ -22,6 +22,16 @@ pub struct MqttEvent {
     pub session_present: u8,
     pub topic_len: usize,
     pub payload_len: usize,
+}
+/// Additive reconnect policy for `mqtt_client_connect_ex`. `enabled` must be 0 or 1.
+/// A null policy pointer means disabled (the default).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MqttReconnectPolicy {
+    pub enabled: u8,
+    pub max_attempts: u32,
+    pub base_delay_ms: u32,
+    pub max_delay_ms: u32,
 }
 struct Entry {
     client: Client,
@@ -55,11 +65,13 @@ unsafe fn bytes<'a>(p: *const u8, len: usize, max: usize) -> Result<&'a [u8], Er
         Ok(unsafe { std::slice::from_raw_parts(p, len) })
     }
 }
+// Borrow/validate before the client registry lock, allocate only inside entry.
+// This prevents unbounded concurrent FFI copies waiting for the same owner lock.
+unsafe fn text_ref<'a>(p: *const u8, len: usize) -> Result<&'a str, Error> {
+    std::str::from_utf8(unsafe { bytes(p, len, 65535)? }).map_err(|_| Error::InvalidArgument)
+}
 unsafe fn text(p: *const u8, len: usize) -> Result<String, Error> {
-    let b = unsafe { bytes(p, len, 65535)? };
-    std::str::from_utf8(b)
-        .map(str::to_owned)
-        .map_err(|_| Error::InvalidArgument)
+    unsafe { text_ref(p, len) }.map(str::to_owned)
 }
 #[no_mangle]
 pub extern "C" fn mqtt_runtime_init() -> i32 {
@@ -117,12 +129,165 @@ pub unsafe extern "C" fn mqtt_client_new(
         Ok(())
     })
 }
-unsafe fn optional_text(p: *const u8, len: usize) -> Result<Option<String>, Error> {
+/// Configure WebSocket for subsequent connect calls on this handle only.
+/// Does not mutate an existing connection. use_tls on connect selects WSS.
+/// enabled=0 resets to TCP/TLS and requires null+0 path; enabled=1 with
+/// null+0 selects /mqtt. Otherwise path is copied and validated (max2048 bytes).
+/// # Safety
+/// A non-null path must reference path_len readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn mqtt_client_set_websocket(
+    handle: u64,
+    enabled: u8,
+    path: *const u8,
+    path_len: usize,
+) -> i32 {
+    boundary(|| {
+        if enabled > 1 || path_len > 2048 || (enabled == 0 && (!path.is_null() || path_len != 0)) {
+            return Err(Error::InvalidArgument);
+        }
+        let value = if path.is_null() && path_len == 0 {
+            "/mqtt"
+        } else {
+            unsafe { text_ref(path, path_len)? }
+        };
+        entry(handle, |e| {
+            let mut opts = e.options.clone();
+            opts.use_websocket = enabled == 1;
+            opts.websocket_path = value.to_owned();
+            if opts.use_websocket {
+                opts.websocket_uri()?;
+            }
+            e.options = opts;
+            Ok(())
+        })
+    })
+}
+
+unsafe fn optional_text<'a>(p: *const u8, len: usize) -> Result<Option<&'a str>, Error> {
     if p.is_null() && len == 0 {
         Ok(None)
     } else {
-        Ok(Some(unsafe { text(p, len)? }))
+        Ok(Some(unsafe { text_ref(p, len)? }))
     }
+}
+
+struct ConnectParams {
+    handle: u64,
+    op: u64,
+    protocol: u8,
+    keep_alive_seconds: u16,
+    use_tls: u8,
+    ca_pem: *const u8,
+    ca_pem_len: usize,
+    username: *const u8,
+    username_len: usize,
+    password: *const u8,
+    password_len: usize,
+    allow_plaintext_credentials: u8,
+    will_topic: *const u8,
+    will_topic_len: usize,
+    will_payload: *const u8,
+    will_payload_len: usize,
+    will_qos: u8,
+    will_retain: u8,
+    client_cert_pem: *const u8,
+    client_cert_pem_len: usize,
+    client_key_pem: *const u8,
+    client_key_pem_len: usize,
+    clean_session: u8,
+    reconnect: ReconnectPolicy,
+}
+unsafe fn apply_connect(p: ConnectParams) -> Result<(), Error> {
+    let ConnectParams {
+        handle,
+        op,
+        protocol,
+        keep_alive_seconds,
+        use_tls,
+        ca_pem,
+        ca_pem_len,
+        username,
+        username_len,
+        password,
+        password_len,
+        allow_plaintext_credentials,
+        will_topic,
+        will_topic_len,
+        will_payload,
+        will_payload_len,
+        will_qos,
+        will_retain,
+        client_cert_pem,
+        client_cert_pem_len,
+        client_key_pem,
+        client_key_pem_len,
+        clean_session,
+        reconnect,
+    } = p;
+    if use_tls > 1 || allow_plaintext_credentials > 1 || will_retain > 1 || clean_session > 1 {
+        return Err(Error::InvalidArgument);
+    }
+    let ca = if ca_pem.is_null() && ca_pem_len == 0 {
+        None
+    } else {
+        Some(unsafe { bytes(ca_pem, ca_pem_len, mqtt_api::MAX_CA_PEM)? })
+    };
+    let client_cert = if client_cert_pem.is_null() && client_cert_pem_len == 0 {
+        None
+    } else {
+        Some(unsafe {
+            bytes(
+                client_cert_pem,
+                client_cert_pem_len,
+                mqtt_api::MAX_CLIENT_CERT_PEM,
+            )?
+        })
+    };
+    let client_key = if client_key_pem.is_null() && client_key_pem_len == 0 {
+        None
+    } else {
+        Some(unsafe {
+            bytes(
+                client_key_pem,
+                client_key_pem_len,
+                mqtt_api::MAX_CLIENT_KEY_PEM,
+            )?
+        })
+    };
+    let username = unsafe { optional_text(username, username_len)? };
+    let password = unsafe { optional_text(password, password_len)? };
+    let will = if will_topic.is_null() && will_topic_len == 0 {
+        if will_payload_len != 0 {
+            return Err(Error::InvalidArgument);
+        }
+        None
+    } else {
+        Some((unsafe { text_ref(will_topic, will_topic_len)? }, unsafe {
+            bytes(will_payload, will_payload_len, mqtt_api::MAX_WILL_PAYLOAD)?
+        }))
+    };
+    entry(handle, |e| {
+        let mut opts = e.options.clone();
+        opts.protocol = protocol;
+        opts.keep_alive = Duration::from_secs(keep_alive_seconds as u64);
+        opts.use_tls = use_tls == 1;
+        opts.ca_pem = ca.map(<[u8]>::to_vec);
+        opts.client_cert_pem = client_cert.map(<[u8]>::to_vec);
+        opts.client_key_pem = client_key.map(<[u8]>::to_vec);
+        opts.username = username.map(str::to_owned);
+        opts.password = password.map(str::to_owned);
+        opts.allow_plaintext_credentials = allow_plaintext_credentials == 1;
+        opts.will = will.map(|(t, p)| mqtt_api::Will {
+            topic: t.to_owned(),
+            payload: p.to_vec(),
+            qos: will_qos,
+            retain: will_retain == 1,
+        });
+        opts.clean_session = clean_session == 1;
+        opts.reconnect = reconnect.clone();
+        e.client.connect(op, opts)
+    })
 }
 
 /// # Safety
@@ -162,74 +327,110 @@ pub unsafe extern "C" fn mqtt_client_connect(
     client_key_pem: *const u8,
     client_key_pem_len: usize,
 ) -> i32 {
-    boundary(|| {
-        if use_tls > 1 || allow_plaintext_credentials > 1 || will_retain > 1 {
-            return Err(Error::InvalidArgument);
-        }
-        let ca = if ca_pem.is_null() && ca_pem_len == 0 {
-            None
+    boundary(|| unsafe {
+        apply_connect(ConnectParams {
+            handle,
+            op,
+            protocol,
+            keep_alive_seconds,
+            use_tls,
+            ca_pem,
+            ca_pem_len,
+            username,
+            username_len,
+            password,
+            password_len,
+            allow_plaintext_credentials,
+            will_topic,
+            will_topic_len,
+            will_payload,
+            will_payload_len,
+            will_qos,
+            will_retain,
+            client_cert_pem,
+            client_cert_pem_len,
+            client_key_pem,
+            client_key_pem_len,
+            clean_session: 1,
+            reconnect: ReconnectPolicy::default(),
+        })
+    })
+}
+
+/// Additive connect: MQTT 3.1.1 `clean_session` (0 or 1) and an optional reconnect policy.
+/// A null `reconnect` pointer uses the default disabled policy. Existing
+/// `mqtt_client_connect` remains clean_session=1 with reconnect off.
+///
+/// # Safety
+/// Same pointer rules as `mqtt_client_connect`. `reconnect` may be null; a
+/// non-null pointer must be aligned and readable for `MqttReconnectPolicy`.
+#[no_mangle]
+pub unsafe extern "C" fn mqtt_client_connect_ex(
+    handle: u64,
+    op: u64,
+    protocol: u8,
+    keep_alive_seconds: u16,
+    use_tls: u8,
+    ca_pem: *const u8,
+    ca_pem_len: usize,
+    username: *const u8,
+    username_len: usize,
+    password: *const u8,
+    password_len: usize,
+    allow_plaintext_credentials: u8,
+    will_topic: *const u8,
+    will_topic_len: usize,
+    will_payload: *const u8,
+    will_payload_len: usize,
+    will_qos: u8,
+    will_retain: u8,
+    client_cert_pem: *const u8,
+    client_cert_pem_len: usize,
+    client_key_pem: *const u8,
+    client_key_pem_len: usize,
+    clean_session: u8,
+    reconnect: *const MqttReconnectPolicy,
+) -> i32 {
+    boundary(|| unsafe {
+        let policy = if reconnect.is_null() {
+            ReconnectPolicy::default()
         } else {
-            Some(unsafe { bytes(ca_pem, ca_pem_len, mqtt_api::MAX_CA_PEM)? }.to_vec())
-        };
-        let client_cert = if client_cert_pem.is_null() && client_cert_pem_len == 0 {
-            None
-        } else {
-            Some(
-                unsafe {
-                    bytes(
-                        client_cert_pem,
-                        client_cert_pem_len,
-                        mqtt_api::MAX_CLIENT_CERT_PEM,
-                    )?
-                }
-                .to_vec(),
-            )
-        };
-        let client_key = if client_key_pem.is_null() && client_key_pem_len == 0 {
-            None
-        } else {
-            Some(
-                unsafe {
-                    bytes(
-                        client_key_pem,
-                        client_key_pem_len,
-                        mqtt_api::MAX_CLIENT_KEY_PEM,
-                    )?
-                }
-                .to_vec(),
-            )
-        };
-        let username = unsafe { optional_text(username, username_len)? };
-        let password = unsafe { optional_text(password, password_len)? };
-        let will = if will_topic.is_null() && will_topic_len == 0 {
-            if will_payload_len != 0 {
+            let raw = *reconnect;
+            if raw.enabled > 1 {
                 return Err(Error::InvalidArgument);
             }
-            None
-        } else {
-            Some(mqtt_api::Will {
-                topic: unsafe { text(will_topic, will_topic_len)? },
-                payload: unsafe {
-                    bytes(will_payload, will_payload_len, mqtt_api::MAX_WILL_PAYLOAD)?
-                }
-                .to_vec(),
-                qos: will_qos,
-                retain: will_retain == 1,
-            })
+            ReconnectPolicy {
+                enabled: raw.enabled == 1,
+                max_attempts: raw.max_attempts,
+                base_delay: Duration::from_millis(raw.base_delay_ms as u64),
+                max_delay: Duration::from_millis(raw.max_delay_ms as u64),
+            }
         };
-        entry(handle, |e| {
-            let mut opts = e.options.clone();
-            opts.protocol = protocol;
-            opts.keep_alive = Duration::from_secs(keep_alive_seconds as u64);
-            opts.use_tls = use_tls == 1;
-            opts.ca_pem = ca.clone();
-            opts.client_cert_pem = client_cert.clone();
-            opts.client_key_pem = client_key.clone();
-            opts.username = username.clone();
-            opts.password = password.clone();
-            opts.allow_plaintext_credentials = allow_plaintext_credentials == 1;
-            opts.will = will.clone();
-            e.client.connect(op, opts)
+        apply_connect(ConnectParams {
+            handle,
+            op,
+            protocol,
+            keep_alive_seconds,
+            use_tls,
+            ca_pem,
+            ca_pem_len,
+            username,
+            username_len,
+            password,
+            password_len,
+            allow_plaintext_credentials,
+            will_topic,
+            will_topic_len,
+            will_payload,
+            will_payload_len,
+            will_qos,
+            will_retain,
+            client_cert_pem,
+            client_cert_pem_len,
+            client_key_pem,
+            client_key_pem_len,
+            clean_session,
+            reconnect: policy,
         })
     })
 }
@@ -244,8 +445,8 @@ pub unsafe extern "C" fn mqtt_client_subscribe(
     qos: u8,
 ) -> i32 {
     boundary(|| {
-        let topic = unsafe { text(topic, topic_len)? };
-        entry(handle, |e| e.client.subscribe(op, topic, qos))
+        let topic = unsafe { text_ref(topic, topic_len)? };
+        entry(handle, |e| e.client.subscribe(op, topic.to_owned(), qos))
     })
 }
 /// # Safety
@@ -265,10 +466,11 @@ pub unsafe extern "C" fn mqtt_client_publish(
         if retain > 1 {
             return Err(Error::InvalidArgument);
         }
-        let topic = unsafe { text(topic, topic_len)? };
-        let payload = unsafe { bytes(payload, payload_len, mqtt_core::MAX_PAYLOAD)? }.to_vec();
+        let topic = unsafe { text_ref(topic, topic_len)? };
+        let payload = unsafe { bytes(payload, payload_len, mqtt_core::MAX_PAYLOAD)? };
         entry(handle, |e| {
-            e.client.publish(op, topic, payload, qos, retain != 0)
+            e.client
+                .publish(op, topic.to_owned(), payload.to_vec(), qos, retain != 0)
         })
     })
 }
@@ -282,13 +484,47 @@ pub unsafe extern "C" fn mqtt_client_unsubscribe(
     topic_len: usize,
 ) -> i32 {
     boundary(|| {
-        let topic = unsafe { text(topic, topic_len)? };
-        entry(handle, |e| e.client.unsubscribe(op, topic))
+        let topic = unsafe { text_ref(topic, topic_len)? };
+        entry(handle, |e| e.client.unsubscribe(op, topic.to_owned()))
     })
 }
 #[no_mangle]
 pub extern "C" fn mqtt_client_disconnect(handle: u64, op: u64) -> i32 {
     boundary(|| entry(handle, |e| e.client.disconnect(op)))
+}
+/// Begin optional graceful close without blocking. timeout_ms must be 1..300000.
+/// First accepted deadline wins; repeats join the same irreversible attempt.
+/// New operations return Closed after acceptance; connecting/disconnecting -> Busy.
+/// Poll retained control completions, not inbound messages. QoS1 waits for PUBACK;
+/// success is not subscriber delivery. Caller must still close/free the handle.
+#[no_mangle]
+pub extern "C" fn mqtt_client_drain_begin(handle: u64, timeout_ms: u32) -> i32 {
+    boundary(|| {
+        let mut store = CLIENTS.lock().map_err(|_| Error::Internal)?;
+        let e = store.1.get_mut(&handle).ok_or(Error::Closed)?;
+        e.client
+            .begin_drain(Duration::from_millis(timeout_ms as u64))
+    })
+}
+/// Nonblocking out-of-band drain result, available even after force close until
+/// free. 0 not-started, 1 pending, 2 drained, 3 timed-out, 4 failed, 5 forced.
+/// Drained includes engine Outgoing Disconnect, not proof of broker receipt.
+/// # Safety
+/// out_status must point to aligned writable u32. Errors leave it unchanged.
+#[no_mangle]
+pub unsafe extern "C" fn mqtt_client_drain_status(handle: u64, out_status: *mut u32) -> i32 {
+    boundary(|| {
+        if out_status.is_null() {
+            return Err(Error::InvalidArgument);
+        }
+        let store = CLIENTS.lock().map_err(|_| Error::Internal)?;
+        let e = store.1.get(&handle).ok_or(Error::Closed)?;
+        let status = e.client.drain_status()? as u32;
+        unsafe {
+            out_status.write(status);
+        }
+        Ok(())
+    })
 }
 /// Poll without blocking. BUFFER_TOO_SMALL (9) writes metadata but retains event.
 /// EMPTY (10) does not change caller memory. Native never retains caller pointers.
@@ -369,6 +605,18 @@ pub extern "C" fn mqtt_client_free(handle: u64) -> i32 {
         s.1.remove(&handle);
         Ok(())
     })
+}
+
+// Not product ABI: opt-in test observer only, no header/generated binding additions.
+#[cfg(feature = "ws-test-observer")]
+#[no_mangle]
+pub extern "C" fn mqtt_test_ws_probe(index: u32) -> u64 {
+    mqtt_core::ws_test_observer::read(index)
+}
+#[cfg(feature = "ws-test-observer")]
+#[no_mangle]
+pub extern "C" fn mqtt_test_ws_probe_reset() {
+    mqtt_core::ws_test_observer::reset();
 }
 
 #[cfg(test)]

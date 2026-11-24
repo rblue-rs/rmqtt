@@ -1,7 +1,5 @@
 use mqtt_api::{Error, Options};
-use rumqttc::{
-    ConnectReturnCode, ConnectionError, StateError, TlsConfiguration, TlsError, Transport,
-};
+use rumqttc::{TlsConfiguration, Transport};
 use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer},
     CertificateError, ClientConfig, Error as RustlsError, RootCertStore,
@@ -28,7 +26,12 @@ pub(crate) fn transport(options: &Options) -> Result<Transport, Error> {
         }
         _ => return Err(Error::CertificateKeyMismatch),
     };
-    Ok(Transport::tls_with_config(TlsConfiguration::from(config)))
+    let config = TlsConfiguration::from(config);
+    Ok(if options.use_websocket {
+        Transport::wss_with_config(config)
+    } else {
+        Transport::tls_with_config(config)
+    })
 }
 
 fn parse_client_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, Error> {
@@ -84,42 +87,7 @@ fn system_roots() -> Result<RootCertStore, Error> {
     Ok(roots)
 }
 
-pub(crate) fn map_connect_error(err: ConnectionError) -> Error {
-    match err {
-        ConnectionError::ConnectionRefused(
-            ConnectReturnCode::BadUserNamePassword | ConnectReturnCode::NotAuthorized,
-        ) => Error::BadCredentials,
-        ConnectionError::ConnectionRefused(_) => Error::Refused,
-        ConnectionError::Tls(tls) => map_tls_error(tls),
-        ConnectionError::Io(io) => rustls_from_io(&io).unwrap_or(Error::Network),
-        ConnectionError::MqttState(state) => map_state_error(state),
-        _ => Error::Network,
-    }
-}
-
-fn map_state_error(err: StateError) -> Error {
-    match err {
-        StateError::Io(io) => rustls_from_io(&io).unwrap_or(Error::Network),
-        StateError::Deserialization(rumqttc::mqttbytes::Error::Io(io)) => {
-            rustls_from_io(&io).unwrap_or(Error::Network)
-        }
-        StateError::Deserialization(_) => Error::Network,
-        _ => Error::Network,
-    }
-}
-
-fn map_tls_error(err: TlsError) -> Error {
-    match err {
-        TlsError::TLS(error) => map_rustls(&error),
-        TlsError::DNSName(_) => Error::HostnameMismatch,
-        TlsError::NoValidCertInChain => Error::InvalidArgument,
-        TlsError::Io(io) => rustls_from_io(&io).unwrap_or(Error::Tls),
-        TlsError::WebPki(_) => Error::CertificateUntrusted,
-        _ => Error::Tls,
-    }
-}
-
-fn rustls_from_io(io: &io::Error) -> Option<Error> {
+pub(crate) fn rustls_from_io(io: &io::Error) -> Option<Error> {
     if let Some(error) = io
         .get_ref()
         .and_then(|inner| inner.downcast_ref::<RustlsError>())
@@ -170,4 +138,22 @@ fn map_certificate(err: &CertificateError) -> Error {
         }
         _ => Error::CertificateUntrusted,
     }
+}
+
+// WSS TLS failures are nested in tungstenite rather than rumqttc's TLS arm.
+// Traverse typed error sources, never format potentially sensitive URL/headers.
+pub(crate) fn map_websocket_error(err: &(dyn StdError + 'static)) -> Error {
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(tls) = e.downcast_ref::<RustlsError>() {
+            return map_rustls(tls);
+        }
+        if let Some(io) = e.downcast_ref::<io::Error>() {
+            if let Some(mapped) = rustls_from_io(io) {
+                return mapped;
+            }
+        }
+        current = e.source();
+    }
+    Error::Network
 }

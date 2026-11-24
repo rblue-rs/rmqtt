@@ -1,0 +1,18 @@
+[package]
+name = "ws-resource-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+# Independent diagnostic workspace. No production dependency or feature change.
+[workspace]
+
+[dependencies]
+tungstenite = "=0.26.2"
+async-tungstenite = "=0.29.1"
+ws_stream_tungstenite = "=0.15.0"
+futures = "=0.3.34"
+mqtt-core = { path = "../../crates/mqtt-core" }
+mqtt-api = { path = "../../crates/mqtt-api" }
+mqtt-runtime = { path = "../../crates/mqtt-runtime" }

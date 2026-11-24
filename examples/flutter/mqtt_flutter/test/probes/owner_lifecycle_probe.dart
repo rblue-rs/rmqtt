@@ -3,9 +3,11 @@ import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
-import 'package:mqtt_flutter/mqtt_flutter.dart';
-import 'package:ffi/ffi.dart';
-import 'package:mqtt_flutter/src/ffi_bindings.dart';
+
+import 'package:rmqtt_flutter/rmqtt_flutter.dart';
+import 'package:rmqtt_flutter/src/ffi_bindings.dart';
+
+import 'observe_not_initialized.dart';
 
 int get port => int.parse(Platform.environment['MQTT_TEST_PORT']!);
 MqttClient client(String id) =>
@@ -50,7 +52,8 @@ Future<void> main(List<String> args) async {
     await Isolate.run(() => owner(0, false));
   } else if (mode == 'multi') {
     await Future.wait(
-        List.generate(8, (i) => Isolate.run(() => owner(i, i.isEven))));
+      List.generate(8, (i) => Isolate.run(() => owner(i, i.isEven))),
+    );
   } else if (mode == 'natural') {
     final ready = ReceivePort(), dead = ReceivePort();
     await Isolate.spawn(naturalOwner, ready.sendPort, onExit: dead.sendPort);
@@ -59,18 +62,23 @@ Future<void> main(List<String> args) async {
     ready.close();
     dead.close();
   } else if (mode == 'init-exit') {
-    await Future.wait(List.generate(
+    await Future.wait(
+      List.generate(
         8,
         (_) => Isolate.run(() async {
-              await MqttClient.ensureInitialized();
-            })));
+          await MqttClient.ensureInitialized();
+        }),
+      ),
+    );
   } else if (mode == 'kill' || mode == 'kill-default') {
     final ready = ReceivePort(), dead = ReceivePort();
-    final isolate = await Isolate.spawn(killOwner, <Object>[ready.sendPort],
-        onExit: dead.sendPort);
+    final isolate = await Isolate.spawn(killOwner, <Object>[
+      ready.sendPort,
+    ], onExit: dead.sendPort);
     await ready.first.timeout(const Duration(seconds: 5));
     isolate.kill(
-        priority: mode == 'kill' ? Isolate.immediate : Isolate.beforeNextEvent);
+      priority: mode == 'kill' ? Isolate.immediate : Isolate.beforeNextEvent,
+    );
     await dead.first.timeout(const Duration(seconds: 5));
     ready.close();
     dead.close();
@@ -86,7 +94,12 @@ Future<void> main(List<String> args) async {
       stderr.writeln('client retained after GC pressure');
       exit(1);
     }
-    for (var i = 0;; i++) {
+    // The client lived in this still-running main isolate. After GC, the
+    // static runtime owner still holds this isolate's init ref. Dart
+    // shutdownRuntime releases that living owner, retrying Busy until the
+    // client finalizer drops the lease. It is not a substituting native
+    // shutdown for an already-exited owner.
+    for (var i = 0; ; i++) {
       try {
         await MqttClient.shutdownRuntime();
         break;
@@ -99,28 +112,18 @@ Future<void> main(List<String> args) async {
     throw ArgumentError.value(mode);
   }
   final native = MqttBindings(
-      DynamicLibrary.open(Platform.environment['MQTT_NATIVE_LIBRARY']!));
-  final firstShutdown = native.mqtt_runtime_shutdown();
-  if (firstShutdown != 0) {
-    stderr.writeln('$mode shutdown expected0 actual$firstShutdown');
+    DynamicLibrary.open(Platform.environment['MQTT_NATIVE_LIBRARY']!),
+  );
+  // Observe automatic cleanup first. A substituting mqtt_runtime_shutdown
+  // would consume one leftover owner init ref and hide the mismatch.
+  final observed = await waitForNotInitialized(native);
+  if (observed.code != 2) {
+    stderr.writeln(
+      '$mode leaked init refs: new=${observed.code} expected2 before shutdown after ${observed.elapsedMilliseconds}ms',
+    );
     exit(1);
   }
-  final after = using((a) {
-    final host = a<Uint8>(9), id = a<Uint8>(4), out = a<Uint64>();
-    host.asTypedList(9).setAll(0, '127.0.0.1'.codeUnits);
-    id.asTypedList(4).setAll(0, 'post'.codeUnits);
-    final code = native.mqtt_client_new(host, 9, id, 4, 1883, out);
-    if (code == 0) {
-      native.mqtt_client_close(out.value);
-      native.mqtt_client_free(out.value);
-    }
-    return code;
-  });
-  if (after != 2) {
-    stderr.writeln('$mode leaked init refs: new=$after expected2');
-    exit(1);
-  }
-  // Further calls check idempotence, after proving the first call cleared all refs.
+  // Shutdown is checked only for idempotence after NotInitialized was observed.
   for (var i = 0; i < 32; i++) {
     final code = native.mqtt_runtime_shutdown();
     if (code != 0) {
@@ -129,5 +132,7 @@ Future<void> main(List<String> args) async {
       return;
     }
   }
-  stdout.writeln('$mode PASS: resources and init refs settled');
+  stdout.writeln(
+    '$mode PASS: NotInitialized observed before shutdown in ${observed.elapsedMilliseconds}ms',
+  );
 }

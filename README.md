@@ -7,7 +7,10 @@ is not that package and must not be published to crates.io under that occupied n
 
 ## What actually works on the Linux host
 
-- Rust `rumqttc = 0.25.1`, shared Tokio runtime, real MQTT **3.1.1 over TCP** and **host TLS**, including **host mTLS**.
+- Rust `rumqttc = 0.25.1`, shared Tokio runtime, real MQTT **3.1.1 over TCP** and **host TLS**, including **host mTLS**. MQTT **5.0 TCP/TLS baseline** requires explicit
+  keepalive 5..65535 seconds; default-zero MQTT5 stays Unsupported. See [MQTT5](docs/mqtt5.md).
+- MQTT3.1.1 and MQTT5 [WS/WSS on the Linux host](docs/websocket.md), using native
+  Mosquitto WebSocket listeners (no relay); opt-in useWebSocket with /mqtt path.
 - Username/password on TLS, or on plaintext TCP only with an explicit
   `allowPlaintextCredentials` switch. Without that switch, a password on
   plaintext is rejected before connect and is never silently dropped.
@@ -22,17 +25,25 @@ is not that package and must not be published to crates.io under that occupied n
   independent temporary loopback aMQTT broker, including binary messages.
 - Disconnect/reconnect, permanent force-close, numeric handles (no raw handle UAF),
   caller-owned buffers and buffer-size retry, final runtime shutdown refusing live clients.
+- Optional bounded [`drainClose` / `beginDrainClose`](docs/drain-close.md) waits for
+  accepted outgoing protocol work; ordinary `close()` stays immediate force-close.
+- Optional automatic reconnect, default **off**, with a required attempt ceiling
+  and equal-jitter backoff. See [reconnect](docs/reconnect.md). MQTT 3.1.1
+  `cleanSession` is explicit (default true). An in-process subscription
+  expectation set is used only after a successful connection later drops.
 - Bounded native commands/events; overflow terminates, never silently evicts control
-  events. Pausing any Dart stream listener stops polling and applies backpressure.
+  events. Pausing a stream normally stops polling; explicit drain polls only retained
+  control completions and discards inbound messages.
 - Additive `MqttOperation<T>` / beginX APIs expose immediate operationId/future/cancel;
   existing Future methods delegate. Cancel abandons only local waiting, not MQTT packets.
 - Weak adaptive polling, bounded stream backpressure, matching-allocator native buffer
   cleanup, and native-only scalar owner-exit notifications. NativeFinalizer is GC fallback.
-- Default `keepAlivePeriod = Duration.zero` is actually encoded as zero in CONNECT.
+- Default `keepAlivePeriod = Duration.zero` is encoded as zero for MQTT3.1.1;
+  MQTT5 with zero is typed Unsupported before network activity.
 
 ## Explicitly not implemented / not validated
 
-Host TLS (MQTT 3.1.1) verifies the certificate chain and hostname. No custom CA
+Host TLS (MQTT 3.1.1 and 5.0) verifies the certificate chain and hostname. No custom CA
 PEM means the **host** system roots are used. A caller-supplied CA PEM is trusted
 exclusively; system roots are not mixed in. TLS cannot silently fall back to
 plaintext. There is no skip-verify / onBadCertificate / insecure switch.
@@ -44,12 +55,16 @@ options Debug and Dart `toString`. Close best-effort clears in-memory copies;
 this is not a secure-erase guarantee. This is a Linux-host TLS/mTLS result,
 not a claim about Android or iOS trust stores.
 
-**No MQTT 5 engine, WS/WSS, reconnect policy, persistent sessions,
-subscription reconciliation, graceful draining close,
-mobile plugin packaging or mobile tests yet.** MQTT 5 returns
-`MqttException(6)` / Rust `Error::Unsupported`, including its default-zero case;
-it never rewrites 0 to 5 or 60 and never invokes the panicking v5 setter.
-Unsupported features are not silently ignored. This is NOT the complete planned API.
+**No mobile WSS/Flutter Web, disk outbox, cross-process QoS recovery, or mobile verification.**
+MQTT5 baseline succeeds with explicit supported nonzero keepalive only; 0..4s
+returns `MqttException(6)` / Rust `Error::Unsupported` without invoking the
+panicking upstream setter. No 0-to-5/60 rewrite. No MQTT5 session-expiry,
+advanced-properties API or enhanced auth. Automatic reconnect remains off by
+default and is not durable persistence. MQTT3.1.1 persistent-session QoS1 resumes the same packet id with DUP after
+a drop; new/clean sessions fail interrupted work explicitly. See
+[QoS1 recovery policy](docs/qos1-recovery.md). MQTT5 drops with accepted outstanding
+work fail terminally.
+See [MQTT5 limits](docs/mqtt5.md). This is NOT the complete planned API.
 
 C ABI is **experimental, not yet frozen**. In particular see
 [the safe polling bridge decision](docs/ffi-safety.md): the original borrowed
@@ -69,8 +84,9 @@ itself a request to close a live connection. See [ownership](docs/ownership.md).
 ## Reproduce on Linux
 
 Install Rust with rustfmt/clippy, a C compiler, Dart, libclang (for regeneration),
-and a Python venv with `amqtt==0.12.2`. `cargo build -p mqtt-c` generates the C
-header using cbindgen. `cd examples/flutter/mqtt_flutter && dart pub get`.
+Mosquitto (tested 2.0.21), and a Python venv with `amqtt==0.12.2`. `cargo build -p mqtt-c` generates the C
+header into Cargo OUT_DIR using crate-local cbindgen config;
+`scripts/generate-bindings.sh` explicitly exports it and regenerates Dart bindings. `cd examples/flutter/mqtt_flutter && dart pub get`.
 
 ```sh
 # Optional: point LIBCLANG_ROOT to a directory containing lib/libclang.so.
@@ -81,7 +97,7 @@ LIBCLANG_ROOT=/path/to/llvm C_INCLUDE_DIR=/path/to/c/include \
 MQTT_TEST_PYTHON=/path/to/venv/bin/python scripts/test-host.sh
 ```
 
-Overrides: `CARGO`, `DART`, `CC`, `MQTT_TEST_PYTHON`. The test broker binds only
+Overrides: `CARGO`, `DART`, `CC`, `MQTT_TEST_PYTHON`, `MQTT5_BROKER` (default `/usr/sbin/mosquitto`). The test broker binds only
 127.0.0.1 on an ephemeral port and is shut down by the fixture. TLS tests generate
 temporary certificates under a temp directory via `scripts/gen_test_certs.py`;
 private keys are not stored in the repository. No public broker,
@@ -94,7 +110,7 @@ The C smoke test uses ASan/UBSan on the C executable, not on Rust dependencies.
 
 `.github/workflows/host-tests.yml` runs the Linux host gate on `ubuntu-24.04`.
 It installs pinned tools (Rust 1.100.0 from `rust-toolchain.toml`, Dart 3.14.0,
-Python 3.13, `amqtt==0.12.2`, plus a C compiler and libclang), runs
+Python 3.13, `amqtt==0.12.2`, plus Mosquitto, a C compiler and libclang), runs
 `scripts/test-host.sh`, then `scripts/check-bindings.sh` so the committed C
 header and Dart bindings match a fresh cbindgen/ffigen regeneration. The
 workflow uses no repository secrets.
@@ -114,8 +130,11 @@ remote CI result.
 
 ## Mobile packaging and buildable evidence
 
-`examples/flutter/mqtt_flutter` is an experimental Flutter FFI plugin skeleton
-plus a minimal sample app in `example/`. It is not a published plugin and not
+`examples/flutter/mqtt_flutter` contains the confirmed **rmqtt_flutter** Flutter FFI
+package plus a minimal sample app in `example/`. The repository directory is retained
+for build-script compatibility; Rust package names and C ABI/library names are unchanged.
+The plugin bundles a hash-checked native source snapshot, licenses, and package-local
+build hooks, not prebuilt native binaries. See its [source-package guide](examples/flutter/mqtt_flutter/README.md). It is not a published plugin and not
 a physical-device verified client.
 
 - Default Android ABI: `arm64-v8a` (`aarch64-linux-android`).
@@ -123,8 +142,12 @@ a physical-device verified client.
 - Native libraries are built with `panic=abort`. A Rust panic aborts the
   process and is not turned into a Dart exception on these targets.
 - iOS does not promise always-on background MQTT.
-- `examples/flutter/tools/build-libs.sh` stages `libmqtt_c.so` or
-  `libmqtt_c.a`. Those artifacts are not committed.
+- Package-local `tool/build-native.sh` builds the bundled source and stages
+  `libmqtt_c.so` or `libmqtt_c.a`; the legacy repository build script remains for
+  earlier full-checkout instructions. Artifacts are not committed or bundled.
+- `publish_to: none` and Cargo `publish = false` remain release guards. Local package
+  extraction/build/load checks do not validate mobile build hooks or establish release
+  readiness; Rust registry naming/versioned dependencies remain unresolved.
 
 A Linux host can produce Android buildable evidence when Flutter 3.50.x and
 Android NDK 28.2.13676358 are installed (`flutter build apk --debug --target-platform android-arm64`). iOS
@@ -138,3 +161,11 @@ See [mobile validation gates](docs/device-smoke.md) for the evidence table.
 
 See [semantics and current limitations](docs/semantics.md),
 [host testing](docs/testing.md), and [mobile validation gates](docs/device-smoke.md).
+
+
+QoS2 publish/subscribe now use the experimental owned production Rust driver for
+MQTT311/5 over host TCP/TLS/native WS/WSS; Will QoS2 remains Unsupported.
+See [actual matrix](docs/qos2-readiness.md) and [driver integration](docs/owned-driver.md).
+Finite WS frame/message/write/HTTP bounds are reachable in production, but the
+[full client-owned aggregate capacity audit](docs/websocket-memory.md) is not yet
+complete. No application exactly-once, total-RSS or new mobile claim follows.

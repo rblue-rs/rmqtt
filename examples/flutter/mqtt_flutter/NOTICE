@@ -1,0 +1,8 @@
+rmqtt_flutter experimental source distribution
+Project source: Apache-2.0; see LICENSE.
+Bundled Dart Native API DL headers/glue: BSD-3-Clause; see
+native/crates/mqtt-c/third_party/dart/LICENSE and its README.md.
+Rust dependencies are resolved by Cargo.lock, not vendored or prebuilt here.
+Their licenses/notices must be reviewed for any binary redistribution; this source
+package and successful local build are not a completed redistribution legal audit.
+No credentials, keys, test certificates or prebuilt native binaries are distributed.

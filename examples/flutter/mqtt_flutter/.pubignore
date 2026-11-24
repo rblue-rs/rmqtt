@@ -1,0 +1,25 @@
+# Native source and Cargo.lock must ship; build outputs and private material must not.
+.dart_tool/
+.packages
+pubspec.lock
+example/pubspec.lock
+example/.dart_tool/
+example/build/
+build/
+native/target/
+.ffigen-local-*.yaml
+*.so
+*.a
+*.dylib
+*.dll
+*.crate
+*.pem
+*.key
+.env
+.env.*
+android/.gradle/
+android/local.properties
+android/src/main/jniLibs/
+ios/Frameworks/
+# Repository-only host/broker tests are not a consumer package installation test.
+test/

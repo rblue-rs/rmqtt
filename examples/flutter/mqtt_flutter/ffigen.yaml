@@ -4,7 +4,7 @@ output: lib/src/ffi_bindings.dart
 use-dart-handle: true
 headers:
   entry-points:
-    - ../../../bindings/c/include/mqtt_client.h
+    - native/bindings/c/include/mqtt_client.h
   include-directives:
     - '**mqtt_client.h'
 functions:

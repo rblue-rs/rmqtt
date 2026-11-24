@@ -2,7 +2,7 @@
 
 ## 可用范围
 
-MQTT 3.1.1 TCP 与主机 TLS、clean session=true、QoS0/1。默认协议 Keep Alive=0，显式整秒
+MQTT 3.1.1 TCP 与主机 TLS、可配 clean session（默认 true）、QoS0/1。默认协议 Keep Alive=0，显式整秒
 1..65535 可设；非整秒和溢出值拒绝，不截断。0 不关闭 TCP keepalive，也不是后台保活。
 启用 TLS 时默认校验证书链与主机名，不提供 skip-verify / onBadCertificate / insecure。
 未提供自定义 CA PEM 时信任**本机**系统根证书；一旦提供自定义 CA PEM，则只信任该 CA，
@@ -25,7 +25,9 @@ CONNACK 认证拒绝（Bad User Name or Password / Not Authorized）映射为
 properties。
 rumqttc 0.25.1 原始 v5 setter 对小于 5 秒 panic；v3 允许0，eventloop 对0不创建心跳定时器。
 测试包含实际 CONNECT 字段0、1，无默认 PING 的1.4秒观察，以及显式1秒 PINGREQ。
-v5 一律返回 typed Unsupported(6)，没有 fork、patch 或暗改 keepalive。
+v5 默认0和1..4秒返回 typed Unsupported(6)，显式整秒5..65535支持 TCP/TLS 基础引擎；
+没有 fork、patch 或暗改 keepalive。v5 cleanSession=false 仍为 Unsupported，
+不实现 session expiry。详见 [MQTT5](mqtt5.md)。
 
 ## 完成与排队
 
@@ -43,19 +45,23 @@ v5 一律返回 typed Unsupported(6)，没有 fork、patch 或暗改 keepalive�
 ## lifecycle（当前与目标的差异）
 
 - 正常 disconnect 等引擎的 DISCONNECT 事件；之后可再 connect。不保证 broker 必然收到。
-- **当前 close 是 force-close**：中止 actor、拒绝 pending、释放句柄；没有优雅排空。
+- **close 仍是 force-close**：中止 actor、拒绝 pending、释放句柄；此方法不排空。
   Dart `close()` 已删除无效的 timeout 参数，不可将此 API 当 drain close。
 - Dart disconnect 等待超时会 force-stop 此次 transport，并回到可再次 connect 的
   disconnected 状态；不保证 broker 收到 DISCONNECT。并发调用共享第一调用的 deadline。
-- 无自动重连；持久会话与订阅期望集未实现，不能从 reconnect 成功推断这些能力已完成。
+- 自动重连默认关闭。开启后仅在首次 CONNACK 成功之后的掉线才退避重试，且必须有次数上限；
+  首次 connect 失败不进循环，也不发出 Reconnecting。详见 [reconnect.md](reconnect.md)。
+- 进程内订阅期望集在本地接受 subscribe/unsubscribe 时更新，不等于 broker 真实订阅，
+  也不是跨进程持久化。进程被杀后是新会话。session_present=1 且非干净会话时不自动全量重订；
+  session_present=0 或干净会话按期望集重订。
 - shutdownRuntime 必须由客户端拥有方协调；每 isolate 的 init/shutdown 引用配对，
   最后一次 shutdown 拒绝仍有 native client lease 的情况，并拒绝 runtime worker 上调用。
 
 ## 状态码（实验 ABI）
 
 0 OK；1 InvalidArgument；2 NotInitialized；3 Closed；4 Busy；5 QueueFull；6 Unsupported；
-7 Network；8 Refused；9 BufferTooSmall；10 Empty；11 Internal；12 Overflow；13 Timeout（预留，
-Dart 等待超时当前是 TimeoutException）；14 Tls（握手/协议失败，例如对明文端口使用 TLS）；
+7 Network；8 Refused；9 BufferTooSmall；10 Empty；11 Internal；12 Overflow；13 Timeout（MQTT5 首次 CONNACK 或 native drain
+截止超时；已有 Dart 操作等待超时仍是 TimeoutException）；14 Tls（握手/协议失败，例如对明文端口使用 TLS）；
 15 CertificateUntrusted（证书链不受信任，含未知颁发者）；16 HostnameMismatch（证书与
 `server` 主机名/IP 不匹配）；17 CertificateExpired（证书过期或尚未生效）；
 18 PlaintextCredentials（明文 TCP 携带密码但未显式允许）；19 BadCredentials（CONNACK
@@ -68,16 +74,31 @@ C poll 不等待网络或事件，但内部互斥锁可能争用；不是 lock-f
 
 ## 缺失不是降级
 
-WS/V5/重连等尚未暴露在当前 Options 中，不能误认为这些选项会被忽略
-并降级。启用 TLS 失败时不会静默改走明文。明文携带密码且未显式允许时不会改走无密码连接。
+WS/WSS 现在有主机验证，详见 [WebSocket](websocket.md)；不等于移动端或 Flutter Web 支持。
+MQTT5 高级属性与增强认证尚未支持，不会静默降级成 MQTT3.1.1。
+v5 负 PUBACK/SUBACK/UNSUBACK 为 terminal Refused(8)，不是成功 ACK；
+v5 掉线时有已接受但未完成工作则 terminal Failure，不继续重连、也不假装恢复 QoS。
+未设置 reconnect policy 时保持关闭，不会悄悄开启重连。启用 TLS 失败时不会静默改走明文。明文携带密码且未显式允许时不会改走无密码连接。
 提供客户端证书却未启用 TLS、或证书与私钥不成对时，不会改走无客户端证书的 TLS。
 最终 API 尚未冻结。任何移动端能力必须另跑
 交叉构建、模拟器、真机验证后再陈述；主机 TLS/mTLS 成功不等于移动端信任根可用。
 
 ## 生命周期
 
-仍为 Linux host 实验切片。没有 drain、回调握手、自动重连、
-磁盘 outbox 或跨进程恢复；本地等待者的一次结算不等于 MQTT exactly-once delivery。
+仍为 Linux host 实验切片。可选有界 drain 见 [drain-close.md](drain-close.md)；可选默认关闭的自动重连
+见 [reconnect.md](reconnect.md)。没有回调握手、磁盘 outbox 或跨进程恢复；本地等待者的一次结算
+不等于 MQTT exactly-once delivery。drain / force-close / 显式 disconnect 不会启动或继续重连循环。
+
+### 可选 drain close
+
+`drainClose(timeout: ...)` / `beginDrainClose` 为独立 additive API；不改变 close/disconnect。
+在同步接受点拒绝新工作；先处理已接受的 native FIFO：QoS0 Sent、QoS1 PUBACK、
+SUBACK/UNSUBACK，最后 Outgoing Disconnect。ACK 不代表订阅者或应用收妥。
+进站消息不排空：丢弃原生待交付 Message，保留控制完成。超时或失败仍永久关闭 transport；
+Dart 交付保留的控制结果后释放 ownership。Rust/C 保留可 poll 的控制事件到显式 close/free。
+首个 deadline 固定为 1..300000 整毫秒；重复 caller 共享结果且各自可取消等待，取消不撤包、
+不取消物理排空。typed result、C 状态域、流暂停例外和 race 优先级完整定义见
+[drain-close.md](drain-close.md)。finalizer/isolate 退出绝不隐式 drain。
 
 ### 状态转移
 
@@ -94,8 +115,12 @@ WS/V5/重连等尚未暴露在当前 Options 中，不能误认为这些选项�
 | connecting | connect timeout | 原生 close/free 此次 handle；回 disconnected，后续 connect 用新 handle |
 | connected | SUBACK/UNSUBACK 等待超时 | 只移除对应 waiter，连接状态不变；迟到 ACK 不能结算其他 op |
 | 任意非 closed | cancel(op_id) | 仅终结本地 waiter/票据尚未完成阶段；不会撤销 MQTT 包或状态转移 |
+| connected（已成功过 CONNACK，且 policy 开启） | 非本端 disconnect 的掉线 | 发 Disconnected 后进入 reconnecting；不会吞掉断线事件 |
+| reconnecting | 退避后 CONNACK | 发 Reconnected(status)；然后按 session_present / clean session 处理期望集 |
+| reconnecting | max_attempts 耗尽 | 终态 Disconnected；不再发起连接 |
+| reconnecting | disconnect / begin_drain / force-close | 停止重连；drain 无在途工作时可立即 drained；force-close 仍立即关闭 |
 | 任意非 closed | close() | 立即转 closed；stop poll → native close/free → free buffers；fail pending；无 drain |
-| closed | close() | 幂等成功；其余合法操作拒绝；native poll 为 Closed(3)，绝不 Empty/旧消息 |
+| closed | close() | 幂等成功；其余工作拒绝；曾完成的 drain 可返回缓存结果；force-close 后 native poll 为 Closed(3)，绝不旧消息 |
 | 任意 | shutdownRuntime | 不改变 client 状态；进程级引用配对；最后一次有 live lease 或在 worker 上调用时 Busy |
 
 native 同一连接最多容纳 32 个 disconnect completion ids（含首个）。重复请求必须遵守

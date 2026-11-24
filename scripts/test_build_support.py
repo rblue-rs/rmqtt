@@ -88,7 +88,7 @@ class IosBuildConfigurationTests(unittest.TestCase):
             self.assertEqual(call['args'][call['args'].index('--crate-type') + 1], 'staticlib')
             self.assertNotIn('lib.crate-type=["staticlib"]', call['args'])
             self.assertIn("s.platform = :ios, '15.0'", (ROOT /
-                'examples/flutter/mqtt_flutter/ios/mqtt_flutter.podspec').read_text())
+                'examples/flutter/mqtt_flutter/ios/rmqtt_flutter.podspec').read_text())
 
 
 if __name__ == '__main__':

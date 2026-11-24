@@ -3,7 +3,8 @@ use std::time::Duration;
 pub const MAX_CA_PEM: usize = 65536;
 pub const MAX_CLIENT_CERT_PEM: usize = 65536;
 pub const MAX_CLIENT_KEY_PEM: usize = 65536;
-pub const MAX_WILL_PAYLOAD: usize = 65536;
+// MQTT Binary Data has a two-byte length in both supported protocols.
+pub const MAX_WILL_PAYLOAD: usize = 65535;
 
 /// MQTT 3.1.1 Last Will. QoS 2 is rejected as unsupported.
 #[derive(Clone)]
@@ -72,6 +73,45 @@ fn take_zeroized_bytes(value: &mut Option<Vec<u8>>) {
     }
 }
 
+/// Automatic reconnect policy. Disabled by default. When enabled, a later drop
+/// may retry with equal jitter and a required attempt ceiling. First connect
+/// failure never enters this loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectPolicy {
+    pub enabled: bool,
+    pub max_attempts: u32,
+    pub base_delay: Duration,
+    pub max_delay: Duration,
+}
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_attempts: 8,
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+        }
+    }
+}
+impl ReconnectPolicy {
+    pub fn validate(&self) -> Result<(), Error> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.max_attempts < 1
+            || self.max_attempts > 10_000
+            || self.base_delay < Duration::from_millis(1)
+            || self.base_delay > self.max_delay
+            || self.max_delay > Duration::from_secs(300)
+            || !self.base_delay.subsec_nanos().is_multiple_of(1_000_000)
+            || !self.max_delay.subsec_nanos().is_multiple_of(1_000_000)
+        {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct Options {
     pub server: String,
@@ -81,6 +121,10 @@ pub struct Options {
     pub keep_alive: Duration,
     /// When true, MQTT is carried over TLS with certificate and hostname checks.
     pub use_tls: bool,
+    /// Carry MQTT in WebSocket binary frames. use_tls selects WSS vs WS.
+    pub use_websocket: bool,
+    /// Absolute URI path, without query, fragment, userinfo or custom headers.
+    pub websocket_path: String,
     /// PEM-encoded CA certificates. `None` with `use_tls` trusts host system
     /// roots only. `Some` trusts only the provided CAs and does not mix in
     /// system roots. Empty or invalid PEM is rejected; it is not a fallback.
@@ -97,16 +141,29 @@ pub struct Options {
     /// TLS connections may send a password without this switch.
     pub allow_plaintext_credentials: bool,
     pub will: Option<Will>,
+    /// MQTT 3.1.1 Clean Session. Default true, matching the previous implicit engine default.
+    pub clean_session: bool,
+    /// Default disabled. Enabling requires a finite max_attempts ceiling.
+    pub reconnect: ReconnectPolicy,
 }
 impl std::fmt::Debug for Options {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Options")
-            .field("server", &self.server)
+            .field(
+                "server",
+                &if self.use_websocket {
+                    "<redacted>"
+                } else {
+                    &self.server
+                },
+            )
             .field("client_id", &self.client_id)
             .field("port", &self.port)
             .field("protocol", &self.protocol)
             .field("keep_alive", &self.keep_alive)
             .field("use_tls", &self.use_tls)
+            .field("use_websocket", &self.use_websocket)
+            .field("websocket_path", &"<redacted>")
             .field("ca_pem", &self.ca_pem.as_ref().map(|_| "<redacted>"))
             .field(
                 "client_cert_pem",
@@ -123,6 +180,8 @@ impl std::fmt::Debug for Options {
                 &self.allow_plaintext_credentials,
             )
             .field("will", &self.will)
+            .field("clean_session", &self.clean_session)
+            .field("reconnect", &self.reconnect)
             .finish()
     }
 }
@@ -135,6 +194,8 @@ impl Options {
             protocol: 4,
             keep_alive: Duration::ZERO,
             use_tls: false,
+            use_websocket: false,
+            websocket_path: "/mqtt".into(),
             ca_pem: None,
             client_cert_pem: None,
             client_key_pem: None,
@@ -142,7 +203,61 @@ impl Options {
             password: None,
             allow_plaintext_credentials: false,
             will: None,
+            clean_session: true,
+            reconnect: ReconnectPolicy::default(),
         }
+    }
+    /// Validated WS/WSS URI. IPv6, URLs, credentials, queries and fragments are
+    /// deliberately not accepted as host/path inputs in this baseline.
+    pub fn websocket_uri(&self) -> Result<String, Error> {
+        let host = &self.server;
+        if !self.use_websocket
+            || self.port == 0
+            || host.is_empty()
+            || host.len() > 253
+            || host.split('.').any(|label| {
+                label.is_empty()
+                    || label.len() > 63
+                    || label.starts_with('-')
+                    || label.ends_with('-')
+                    || !label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+            || (host.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                && host.parse::<std::net::Ipv4Addr>().is_err())
+        {
+            return Err(Error::InvalidArgument);
+        }
+        let path = self.websocket_path.as_bytes();
+        if path.is_empty() || path.len() > 2048 || path[0] != b'/' || path.starts_with(b"//") {
+            return Err(Error::InvalidArgument);
+        }
+        let mut i = 0;
+        while i < path.len() {
+            let b = path[i];
+            if b == b'%' {
+                if i + 2 >= path.len()
+                    || !path[i + 1].is_ascii_hexdigit()
+                    || !path[i + 2].is_ascii_hexdigit()
+                {
+                    return Err(Error::InvalidArgument);
+                }
+                i += 3;
+                continue;
+            }
+            if !b.is_ascii_alphanumeric() && !b"/-._~!$&'()*+,;=:@".contains(&b) {
+                return Err(Error::InvalidArgument);
+            }
+            i += 1;
+        }
+        Ok(format!(
+            "{}://{}:{}{}",
+            if self.use_tls { "wss" } else { "ws" },
+            host,
+            self.port,
+            self.websocket_path
+        ))
     }
     /// Best-effort clearing of secret material. This is not a secure-erase guarantee.
     pub fn clear_secrets(&mut self) {
@@ -155,7 +270,14 @@ impl Options {
         }
     }
     pub fn validate(&self) -> Result<(), Error> {
+        if self.use_websocket {
+            self.websocket_uri()?;
+        } else if self.websocket_path != "/mqtt" {
+            return Err(Error::InvalidArgument);
+        }
+
         if self.server.is_empty()
+            || self.server.len() > 65535
             || self.client_id.is_empty()
             || self.client_id.len() > 65535
             || self.server.contains('\0')
@@ -222,7 +344,11 @@ impl Options {
                 _ => return Err(Error::InvalidArgument),
             }
         }
-        if self.protocol != 4 {
+        self.reconnect.validate()?;
+        if self.protocol == 5 && (self.keep_alive.as_secs() < 5 || !self.clean_session) {
+            return Err(Error::Unsupported);
+        }
+        if self.protocol != 4 && self.protocol != 5 {
             return Err(Error::Unsupported);
         }
         Ok(())

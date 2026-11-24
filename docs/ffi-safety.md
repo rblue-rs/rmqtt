@@ -19,7 +19,8 @@ Reference: https://api.dart.dev/dart-ffi/NativeCallable/NativeCallable.listener.
 - Force close seals the handle immediately, discards queued events and prevents
   later producer events from escaping via poll. Repeated close/free are harmless.
 - Dart release order is stop polling -> native close -> native free -> caller buffers.
-  There is no drain API or callback handshake.
+  Optional explicit drain retains control completions before this release order;
+  it never adds a callback handshake. See [drain close](drain-close.md).
 - One isolate owns each wrapper, timer, buffers and poll consumer. Independent
   clients may live in separate isolates; do not share raw wrapper/buffer pointers.
 - Explicit close is preferred. Weak Timer callbacks do not root an unreachable client.
@@ -39,7 +40,9 @@ Native has 32 pending commands plus one active protocol operation, 128 events
 plus a terminal fatal slot, a 64KiB payload maximum and at most 64 handles.
 Overflow terminates the connection, preserves accepted events, and never silently
 evicts control events. Dart polls at most64 events per turn and admits16 listeners
-per stream. Pausing a listener halts the whole client's poll and can cause overflow.
+per stream. Normally pausing a listener halts the client's poll and can cause overflow.
+Explicit drain instead polls finite retained control events even if streams pause,
+discarding inbound delivery. No application consumption is awaited.
 Coalesced disconnect completion ids and Dart retained join continuations are each
 bounded at32. Cancelled Dart joins retain their slot until the physical attempt ends.
 

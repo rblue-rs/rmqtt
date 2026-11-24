@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'package:mqtt_flutter/src/event_pump.dart';
+import 'package:rmqtt_flutter/src/event_pump.dart';
 import 'package:test/test.dart';
 
 void main() {
